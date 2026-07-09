@@ -1,0 +1,70 @@
+/* landing.css */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
+
+.landing-root {
+  font-family: 'Inter', sans-serif;
+}
+
+/* Keyframe animations copied from LandingPage component */
+@keyframes fadeSlideUp {
+  from { opacity:0; transform:translateY(22px); }
+  to   { opacity:1; transform:translateY(0); }
+}
+@keyframes gradientShift {
+  0%   { background-position:0% 50%; }
+  50%  { background-position:100% 50%; }
+  100% { background-position:0% 50%; }
+}
+@keyframes particleFloat1 {
+  0%,100% { transform:translate(0,0) scale(1); opacity:.5; }
+  33%     { transform:translate(14px,-18px) scale(1.3); opacity:.9; }
+  66%     { transform:translate(-8px,10px) scale(.8); opacity:.4; }
+}
+@keyframes particleFloat2 {
+  0%,100% { transform:translate(0,0) scale(1); opacity:.4; }
+  40%     { transform:translate(-16px,14px) scale(1.2); opacity:.85; }
+  70%     { transform:translate(10px,-8px) scale(.9); opacity:.35; }
+}
+@keyframes tickerScroll {
+  0%   { transform:translateX(0); }
+  100% { transform:translateX(-50%); }
+}
+@keyframes tickPop {
+  0%   { transform:scale(0) rotate(-20deg); opacity:0; }
+  70%  { transform:scale(1.25) rotate(5deg); opacity:1; }
+  100% { transform:scale(1) rotate(0deg); opacity:1; }
+}
+@keyframes pulseDot {
+  0%,100% { opacity:1; transform:scale(1); }
+  50%     { opacity:.5; transform:scale(.75); }
+}
+@keyframes howPop {
+  0%   { opacity:0; transform:translateY(34px) scale(.92); }
+  70%  { opacity:1; transform:translateY(-4px) scale(1.02); }
+  100% { opacity:1; transform:translateY(0) scale(1); }
+}
+@keyframes flowLine {
+  0%   { transform:translateX(-120%); opacity:.25; }
+  45%  { opacity:1; }
+  100% { transform:translateX(220%); opacity:.25; }
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar { width:4px; }
+::-webkit-scrollbar-track { background:transparent; }
+::-webkit-scrollbar-thumb { background:rgba(0,212,255,0.18); border-radius:4px; }
+
+/* Brand name pop effect */
+.brand-name {
+  font-size: clamp(36px,5vw,64px);
+  font-weight: 900;
+  background: linear-gradient(90deg, #00d4ff, #7b2fff, #00ff88);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: brandPop 1s ease-out both;
+}
+@keyframes brandPop {
+  0% { transform: scale(0); opacity: 0; }
+  50% { transform: scale(1.2); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}

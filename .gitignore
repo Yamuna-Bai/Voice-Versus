@@ -1,0 +1,24 @@
+### Python
+__pycache__/
+*.py[cod]
+.Python
+*.log
+.venv/
+venv/
+
+### Secrets
+.env
+backend/.env
+
+### Backend artifacts
+backend/audio/
+
+### Node
+node_modules/
+frontend/node_modules/
+dist/
+
+### OS / IDE
+.DS_Store
+Thumbs.db
+.cursor/
