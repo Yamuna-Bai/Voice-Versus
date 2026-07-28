@@ -1,19 +1,130 @@
-from fastapi import FastAPI, File, UploadFile, Form
+from fastapi import FastAPI, File, UploadFile, Form, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+from sqlalchemy import inspect, text
 from groq import Groq
+from jose import JWTError, jwt
+import bcrypt
 import uvicorn
 import httpx
 import json
 import asyncio
 import re
 import random
+import datetime
+import os
+from typing import Any
+from backend.models.database import Base, engine, get_db
+from backend.models import models
+
+def ensure_database_schema() -> None:
+    Base.metadata.create_all(bind=engine)
+    inspector = inspect(engine)
+    if not inspector.has_table(models.DebateSession.__tablename__):
+        models.DebateSession.__table__.create(bind=engine, checkfirst=True)
+        inspector = inspect(engine)
+    if inspector.has_table("users") and "password_hash" not in [c["name"] for c in inspector.get_columns("users")]:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE users ADD COLUMN password_hash VARCHAR(255) NULL"))
+
+
+ensure_database_schema()
 
 #
 #  ------------------------------------------------------------------ KEYS
-import os
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+GROQ_DEBATE_MODEL = os.getenv("GROQ_DEBATE_MODEL", "llama-3.1-8b-instant")
+GROQ_COACH_MODEL = os.getenv("GROQ_COACH_MODEL", GROQ_DEBATE_MODEL)
+GROQ_FALLBACK_MODEL = os.getenv("GROQ_FALLBACK_MODEL", "llama-3.3-70b-versatile")
+COACH_RESULT_TIMEOUT_SECONDS = float(os.getenv("COACH_RESULT_TIMEOUT_SECONDS", "1.0"))
 DEEPGRAM_KEY = os.getenv("DEEPGRAM_API_KEY")
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY") or os.getenv("SECRET_KEY") or "change-this-secret-in-production"
+JWT_ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "10080"))
+bearer_scheme = HTTPBearer(auto_error=False)
 app = FastAPI(title="AI Debate System")
+
+class UserLoginRequest(BaseModel):
+    name: str
+    email: str
+
+
+class AuthRequest(BaseModel):
+    email: str
+    password: str
+    name: str | None = None
+
+
+class DebateSessionRequest(BaseModel):
+    user_name: str
+    user_email: str
+    topic: str
+    position: str | None = None
+    difficulty: str | None = None
+    turns: list[dict[str, Any]] = []
+    report: dict[str, Any] | None = None
+
+
+def _average_score(turns: list[dict[str, Any]]) -> float:
+    scores = []
+    for turn in turns or []:
+        score = (turn.get("scores") or {}).get("overall")
+        try:
+            scores.append(float(score))
+        except Exception:
+            pass
+    return round(sum(scores) / len(scores), 2) if scores else 0.0
+
+
+def _normalize_email(value: str) -> str:
+    email = (value or "").strip().lower()
+    if "@" not in email or "." not in email:
+        raise HTTPException(status_code=400, detail="Valid email is required")
+    return email
+
+
+def _hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8")[:72], bcrypt.gensalt()).decode("utf-8")
+
+
+def _verify_password(password: str, password_hash: str | None) -> bool:
+    if not password_hash:
+        return False
+    return bcrypt.checkpw(password.encode("utf-8")[:72], password_hash.encode("utf-8"))
+
+
+def _create_access_token(user: models.User) -> str:
+    expires_at = datetime.datetime.utcnow() + datetime.timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    payload = {"sub": user.email, "user_id": user.id, "exp": expires_at}
+    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+
+
+def _auth_response(user: models.User) -> dict[str, Any]:
+    return {
+        "access_token": _create_access_token(user),
+        "token_type": "bearer",
+        "user": {"id": user.id, "name": user.name, "email": user.email},
+    }
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    db: Session = Depends(get_db),
+) -> models.User:
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        email = _normalize_email(str(payload.get("sub") or ""))
+    except (JWTError, HTTPException):
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    user = db.query(models.User).filter(models.User.email == email).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
 
 # ------------------------------------------------------------------ DIFFICULTY LEVELS
 
@@ -306,37 +417,35 @@ def get_response_length_policy(user_text, difficulty="medium"):
     if word_count >= 85 or (word_count >= 60 and detail_markers >= 4):
         return {
             "label": "long",
-            "max_tokens": 260 if difficulty == "hard" else 230,
-            "max_words": 190 if difficulty == "hard" else 170,
-            "max_sentences": 9,
+            "max_tokens": 115 if difficulty == "hard" else 100,
+            "max_words": 70 if difficulty == "hard" else 62,
+            "max_sentences": 4,
             "instructions": (
-                "The user gave a detailed argument with examples or cases. You may give a longer, stronger rebuttal, "
-                "but stay organized and avoid repeating yourself. Give at least 5 strong spoken lines. "
-                "If hard difficulty is selected, open with quick concrete evidence and hit harder. Aim for 7-9 punchy spoken lines."
+                "The user gave a detailed argument. Reply in 3-4 punchy spoken lines, under 70 words. "
+                "Attack only the main flaw, use one concrete reason or example, and end with one challenge."
             ),
         }
 
     if word_count >= 70 or detail_markers >= 3:
         return {
             "label": "medium",
-            "max_tokens": 190 if difficulty == "hard" else 160,
-            "max_words": 120 if difficulty == "hard" else 95,
-            "max_sentences": 6,
+            "max_tokens": 95 if difficulty == "hard" else 85,
+            "max_words": 55 if difficulty == "hard" else 48,
+            "max_sentences": 3,
             "instructions": (
-                "The user gave a moderately developed point. Give a valid counter in at least 5 short spoken lines, ideally 5-6 lines, "
-                "Attack the main flaw only. If hard difficulty is selected, include quick concrete evidence in the first two lines."
+                "The user gave a moderate point. Reply in 2-3 short spoken lines, under 55 words. "
+                "Make one clear counterpoint and one sharp challenge."
             ),
         }
 
     return {
         "label": "short",
-        "max_tokens": 180 if difficulty == "hard" else 150,
-        "max_words": 115 if difficulty == "hard" else 95,
-        "max_sentences": 5,
+        "max_tokens": 75 if difficulty == "hard" else 65,
+        "max_words": 38 if difficulty == "hard" else 32,
+        "max_sentences": 2,
         "instructions": (
-            "The user gave a short or simple point. Give exactly 5 short, strong spoken lines, max 95 words. "
-            "Make one clear counterpoint, one quick example or reason, and one sharp question. "
-            "If hard difficulty is selected, use quick evidence immediately and make the opposite side feel forceful. Do not over-explain."
+            "The user gave a short point. Reply in 1-2 sharp spoken lines, under 38 words. "
+            "Do not over-explain. End with a direct challenge."
         ),
     }
 
@@ -368,7 +477,7 @@ def build_history_context(history_list):
     if not history_list:
         return ""
     context = "\n\nCONVERSATION SO FAR (most recent last):\n"
-    for turn in history_list[-6:]:
+    for turn in history_list[-3:]:
         role = turn.get("role", "")
         content = turn.get("content", "").strip()
         if role == "user":
@@ -407,6 +516,80 @@ def normalize_coach_result(data):
     }
 
 
+def quick_coach_result(argument, topic):
+    cleaned = re.sub(r"[^a-z0-9\s']", " ", (argument or "").lower())
+    words = re.findall(r"\b[a-z0-9']+\b", cleaned)
+    word_count = len(words)
+    unique_ratio = len(set(words)) / max(1, word_count)
+    topic_words = {
+        w for w in re.findall(r"\b[a-z0-9']+\b", (topic or "").lower())
+        if len(w) > 3 and w not in {"does", "more", "than", "good", "will", "should", "better"}
+    }
+    topic_hits = sum(1 for w in words if w in topic_words)
+    reasoning_hits = len(re.findall(
+        r"\b(because|therefore|so|however|evidence|example|data|study|impact|risk|benefit|cost|case)\b",
+        cleaned,
+    ))
+    evidence_hits = len(re.findall(r"\b(example|data|study|statistic|percent|case|report|research|survey)\b", cleaned))
+
+    score = 4
+    if word_count >= 8:
+        score += 1
+    if word_count >= 18:
+        score += 1
+    if topic_hits:
+        score += 1
+    if reasoning_hits:
+        score += 1
+    if evidence_hits:
+        score += 1
+    if unique_ratio < 0.45 and word_count >= 10:
+        score -= 1
+    score = max(1, min(10, score))
+
+    fallacies = []
+    if re.search(r"\b(always|never|everyone|nobody|all|none)\b", cleaned):
+        fallacies.append({
+            "type": "hasty_generalization",
+            "explanation": "The argument uses broad absolute language that may need stronger evidence.",
+        })
+    if re.search(r"\b(either|only two options|no choice|must be)\b", cleaned):
+        fallacies.append({
+            "type": "false_dichotomy",
+            "explanation": "The argument may frame the issue as having fewer options than it really has.",
+        })
+
+    if evidence_hits:
+        coach_tip = "Connect your evidence directly to the claim so the impact is impossible to miss."
+    elif reasoning_hits:
+        coach_tip = "Add one concrete example, statistic, or real case to make the reasoning stronger."
+    else:
+        coach_tip = "Use claim + because + example so your next point lands faster."
+
+    return {
+        "scores": {
+            "score": score,
+            "overall": score,
+            "argument_quality": max(1, min(10, score + (1 if reasoning_hits else 0))),
+            "evidence_use": max(1, min(10, 4 + evidence_hits * 2)),
+            "rebuttal_strength": max(1, min(10, score)),
+            "feedback": "Good start. Make the point sharper with a clearer reason and specific support.",
+            "coach_tip": coach_tip,
+        },
+        "fallacy_analysis": {
+            "detected": len(fallacies) > 0,
+            "fallacies": fallacies[:2],
+        },
+    }
+
+
+def consume_task_exception(task):
+    try:
+        task.result()
+    except Exception as exc:
+        print("BACKGROUND TASK ERROR:", exc)
+
+
 # ------------------------------------------------------------------ APP
 
 app.add_middleware(
@@ -422,6 +605,148 @@ def root():
     return {"status": "AI Debate System Running"}
 
 
+# ------------------------------------------------------------------ USERS / HISTORY
+
+@app.post("/signup")
+def signup(payload: AuthRequest, db: Session = Depends(get_db)):
+    name = (payload.name or "").strip()
+    email = _normalize_email(payload.email)
+    password = payload.password or ""
+    if not name:
+        raise HTTPException(status_code=400, detail="Name is required")
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+
+    user = db.query(models.User).filter(models.User.email == email).first()
+    if user and user.password_hash:
+        raise HTTPException(status_code=409, detail="An account with this email already exists")
+    if user:
+        user.name = name
+        user.password_hash = _hash_password(password)
+        user.last_login_at = datetime.datetime.utcnow()
+    else:
+        user = models.User(name=name, email=email, password_hash=_hash_password(password))
+        db.add(user)
+    db.commit()
+    db.refresh(user)
+    return _auth_response(user)
+
+
+@app.post("/login")
+def login(payload: AuthRequest, db: Session = Depends(get_db)):
+    email = _normalize_email(payload.email)
+    user = db.query(models.User).filter(models.User.email == email).first()
+    if not user or not _verify_password(payload.password or "", user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    user.last_login_at = datetime.datetime.utcnow()
+    db.commit()
+    db.refresh(user)
+    return _auth_response(user)
+
+
+@app.get("/me")
+def me(current_user: models.User = Depends(get_current_user)):
+    return {"id": current_user.id, "name": current_user.name, "email": current_user.email}
+
+
+@app.post("/users/login")
+def login_user(payload: UserLoginRequest, db: Session = Depends(get_db)):
+    name = payload.name.strip()
+    email = _normalize_email(payload.email)
+    if not name:
+        raise HTTPException(status_code=400, detail="Name is required")
+
+    user = db.query(models.User).filter(models.User.email == email).first()
+    if user:
+        user.name = name
+        user.last_login_at = datetime.datetime.utcnow()
+    else:
+        user = models.User(name=name, email=email)
+        db.add(user)
+    db.commit()
+    db.refresh(user)
+    return {"id": user.id, "name": user.name, "email": user.email}
+
+
+@app.post("/debate-sessions")
+def save_debate_session(
+    payload: DebateSessionRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    user_email = current_user.email
+    turns = payload.turns or []
+    avg_score = _average_score(turns)
+    fallacies = []
+    coach_feedback = []
+    confidence_scores = []
+
+    for turn in turns:
+        fallacies.extend((turn.get("fallacies") or {}).get("fallacies") or [])
+        feedback = (turn.get("scores") or {}).get("feedback")
+        if feedback:
+            coach_feedback.append(feedback)
+        confidence = (turn.get("confidenceAnalysis") or {}).get("confidenceScore")
+        try:
+            confidence_scores.append(float(confidence))
+        except Exception:
+            pass
+
+    session = models.DebateSession(
+        user_name=current_user.name,
+        user_email=user_email,
+        topic=payload.topic.strip(),
+        position=(payload.position or "").strip(),
+        difficulty=(payload.difficulty or "").strip(),
+        overall_score=avg_score,
+        fluency_score=avg_score,
+        relevance_score=avg_score,
+        persuasion_score=avg_score,
+        confidence_score=round(sum(confidence_scores) / len(confidence_scores), 2) if confidence_scores else None,
+        fallacies_detected=json.dumps(fallacies),
+        ai_feedback=" ".join(coach_feedback[:3]),
+        turns_json=json.dumps(turns),
+        report_json=json.dumps(payload.report or {}),
+    )
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    return {"id": session.id, "saved": True}
+
+
+@app.get("/debate-sessions")
+def list_debate_sessions(
+    email: str | None = Query(default=None),
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if email and _normalize_email(email) != current_user.email:
+        raise HTTPException(status_code=403, detail="You can only access your own debate sessions")
+    user_email = current_user.email
+    sessions = (
+        db.query(models.DebateSession)
+        .filter(models.DebateSession.user_email == user_email)
+        .order_by(models.DebateSession.created_at.desc())
+        .all()
+    )
+    return [
+        {
+            "id": session.id,
+            "user_name": session.user_name,
+            "user_email": session.user_email,
+            "topic": session.topic,
+            "position": session.position,
+            "difficulty": session.difficulty,
+            "overall_score": session.overall_score,
+            "confidence_score": session.confidence_score,
+            "turns": json.loads(session.turns_json or "[]"),
+            "report": json.loads(session.report_json or "{}"),
+            "created_at": session.created_at.isoformat() if session.created_at else None,
+        }
+        for session in sessions
+    ]
+
+
 # ------------------------------------------------------------------ VOICE TURN
 
 @app.post("/debate/voice-turn")
@@ -432,6 +757,7 @@ async def voice_debate_turn(
     history:    str        = Form(default="[]"),
     difficulty: str        = Form(default="medium"),
     transcript: str        = Form(default=""),
+    current_user: models.User = Depends(get_current_user),
 ):
     try:
         difficulty = normalize_difficulty(difficulty)
@@ -723,6 +1049,25 @@ Output ONLY your spoken rebuttal. No labels, no stage directions, no meta-commen
 Write as if someone is listening to you speak. Spoken rhythm, not written prose.
 For short and medium arguments, do not write a paragraph wall. Keep it compact and readable."""
 
+        # Demo mode: send a compact prompt so live turns return faster.
+        debate_system = f"""You are Alex, a sharp live debate opponent.
+
+Topic: {topic}
+User side: {user_side}
+Your side: {alex_side}
+
+Rules:
+- Always argue {alex_side}; never become neutral or support {user_side}.
+- React to the user's specific claim, then attack its weakest point.
+- Attack style for this turn: {attack_strategy}
+- Debate intensity: {escalation_tone}
+- Length: {length_policy["instructions"]}
+- Sound human and spoken. Use contractions. No essay words like furthermore, moreover, or in conclusion.
+- Do not open with "I disagree", "Actually", "Great point", "I understand", or "On the contrary".
+- Output only Alex's rebuttal. No labels or notes.
+
+{DIFFICULTY_STYLES[difficulty]}"""
+
         # --------------------------------- DEBATE USER MESSAGE
         debate_user = f"""{history_context}
 
@@ -762,10 +1107,30 @@ Write only in English.
 
         # --------------------------------- PARALLEL LLM CALLS
 
+        def create_chat_completion(*, model, messages, temperature, max_tokens, **kwargs):
+            try:
+                return groq_client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    **kwargs,
+                )
+            except Exception:
+                if model == GROQ_FALLBACK_MODEL:
+                    raise
+                return groq_client.chat.completions.create(
+                    model=GROQ_FALLBACK_MODEL,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    **kwargs,
+                )
+
         def get_ai_response():
             try:
-                res = groq_client.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
+                res = create_chat_completion(
+                    model=GROQ_DEBATE_MODEL,
                     messages=[
                         {"role": "system", "content": debate_system},
                         {"role": "user",   "content": debate_user},
@@ -816,11 +1181,11 @@ Write only in English.
 
         def get_coach_result():
             try:
-                res = groq_client.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
+                res = create_chat_completion(
+                    model=GROQ_COACH_MODEL,
                     messages=[{"role": "user", "content": coach_prompt}],
                     temperature=0.2,
-                    max_tokens=300,
+                    max_tokens=160,
                 )
                 raw = res.choices[0].message.content.strip()
                 raw = raw.replace("```json", "").replace("```", "").strip()
@@ -837,10 +1202,19 @@ Write only in English.
                     "fallacy_analysis": {"detected": False, "fallacies": []},
                 }
 
-        ai_response, coach_result = await asyncio.gather(
-            asyncio.to_thread(get_ai_response),
-            asyncio.to_thread(get_coach_result),
-        )
+        ai_task = asyncio.create_task(asyncio.to_thread(get_ai_response))
+        coach_task = asyncio.create_task(asyncio.to_thread(get_coach_result))
+        coach_task.add_done_callback(consume_task_exception)
+
+        ai_response = await ai_task
+        try:
+            coach_result = await asyncio.wait_for(
+                asyncio.shield(coach_task),
+                timeout=COACH_RESULT_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            print("COACH TIMEOUT: using quick local feedback")
+            coach_result = quick_coach_result(user_text, topic)
 
         print("AI RESPONSE:", ai_response)
 

@@ -14,6 +14,7 @@ const TOPICS = [
 ];
 
 const MAX_TURNS = 5;
+const API_BASE = "http://localhost:8000";
 const MAX_SPEAKING_MS = 60000;
 const MIN_RECORDING_MS = 1800;
 const SILENCE_STOP_MS = 4000;
@@ -24,7 +25,7 @@ const NOISE_GATE_MULTIPLIER = 1.55;
 const MAX_DEMO_VOICE_THRESHOLD = 0.038;
 const VOICE_DROP_SILENCE_RATIO = 0.42;
 const NO_SPEECH_AUTO_STOP_MS = 8500;
-const SPEAKER_HANDOFF_DELAY_MS = 4000;
+const SPEAKER_HANDOFF_DELAY_MS = 80;
 const MIC_AUDIO_CONSTRAINTS = {
   audio: {
     echoCancellation: true,
@@ -35,6 +36,42 @@ const MIC_AUDIO_CONSTRAINTS = {
     sampleSize: { ideal: 16 },
   },
 };
+
+function getStoredAuthUser() {
+  try {
+    const stored = JSON.parse(localStorage.getItem("debateAuth") || localStorage.getItem("debateUser"));
+    return stored && typeof stored.name === "string" && stored.name.trim()
+      ? {
+        id: stored.id,
+        name: stored.name.trim(),
+        email: typeof stored.email === "string" ? stored.email.trim().toLowerCase() : "",
+        access_token: stored.access_token || stored.token || "",
+      }
+      : null;
+  } catch { return null; }
+}
+
+function storeAuthUser(user) {
+  try {
+    localStorage.setItem("debateAuth", JSON.stringify(user));
+    localStorage.setItem("debateUser", JSON.stringify(user));
+  } catch { }
+}
+
+function clearAuthUser() {
+  try {
+    localStorage.removeItem("debateAuth");
+    localStorage.removeItem("debateUser");
+  } catch { }
+}
+
+function authHeaders(user) {
+  return user?.access_token ? { Authorization: `Bearer ${user.access_token}` } : {};
+}
+
+function isAuthExpiredResponse(res, data) {
+  return res.status === 401 && /auth|token|user not found/i.test(String(data?.detail || ""));
+}
 
 const DIFFICULTIES = [
   { id: "easy", label: "Easy", icon: "😄", desc: "Simple & short" },
@@ -312,7 +349,7 @@ function analyzeUserLanguage(turns) {
 }
 
 // ── FinalReport ───────────────────────────────────────────────────────────────
-function FinalReport({ turns, topic, position, onRestart, onCombined, username }) {
+function FinalReport({ turns, topic, position, onRestart, onCombined, username, saveStatus }) {
   const fallacySectionRef = useRef(null);
   const faceSectionRef = useRef(null);
   const scores = turns.map(t => t.scores?.overall || 0);
@@ -390,6 +427,11 @@ function FinalReport({ turns, topic, position, onRestart, onCombined, username }
   return (
     <div style={{ minHeight: "100vh", background: "linear-gradient(135deg,#020510 0%,#060c1a 50%,#020510 100%)", color: "#e8f0ff", fontFamily: "'Courier New',monospace", display: "flex", alignItems: "center", justifyContent: "center", padding: "40px 24px" }}>
       <div style={{ maxWidth: "900px", width: "100%" }}>
+        {saveStatus?.message && (
+          <div style={{ marginBottom: "14px", color: saveStatus.type === "error" ? "#ff7777" : saveStatus.type === "saved" ? "#00ff88" : "#00d4ff", fontSize: "12px", letterSpacing: "1.5px", textAlign: "right" }}>
+            {saveStatus.message}
+          </div>
+        )}
         <div style={{ textAlign: "center", marginBottom: "40px" }}>
           <div style={{ fontSize: "52px", marginBottom: "12px" }}>🏆</div>
           <h2 style={{ fontSize: "32px", fontWeight: "900", margin: "0 0 8px", letterSpacing: "4px", background: "linear-gradient(90deg,#00d4ff,#7b2fff)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>DEBATE COMPLETE</h2>
@@ -789,6 +831,52 @@ function LeaderboardScreen({ onBack, currentUser }) {
   );
 }
 
+function HistoryScreen({ sessions, loading, err, onBack, onOpenSession, onRefresh }) {
+  useEffect(() => { onRefresh?.(); }, [onRefresh]);
+
+  return (
+    <div style={{ minHeight: "100vh", background: "linear-gradient(135deg,#020510 0%,#060c1a 50%,#020510 100%)", color: "#e8f0ff", fontFamily: "'Courier New',monospace", padding: "44px 24px" }}>
+      <div style={{ maxWidth: "900px", margin: "0 auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "16px", marginBottom: "34px" }}>
+          <div>
+            <div style={{ fontSize: "11px", color: "#00d4ff", letterSpacing: "3px", marginBottom: "8px" }}>SAVED REPORTS</div>
+            <h1 style={{ margin: 0, fontSize: "30px", letterSpacing: "3px" }}>DEBATE HISTORY</h1>
+          </div>
+          <div style={{ display: "flex", gap: "10px" }}>
+            <button onClick={onRefresh} disabled={loading} style={{ background: "rgba(0,212,255,0.06)", border: "1px solid rgba(0,212,255,0.22)", color: "#00d4ff", padding: "10px 18px", borderRadius: "8px", cursor: loading ? "wait" : "pointer", fontFamily: "'Courier New',monospace", letterSpacing: "2px", opacity: loading ? 0.7 : 1 }}>REFRESH</button>
+            <button onClick={onBack} style={{ background: "transparent", border: "1px solid rgba(0,212,255,0.22)", color: "#00d4ff", padding: "10px 22px", borderRadius: "8px", cursor: "pointer", fontFamily: "'Courier New',monospace", letterSpacing: "2px" }}>BACK</button>
+          </div>
+        </div>
+
+        {loading && <div style={{ color: "#4a6a8a", fontSize: "13px", letterSpacing: "1px" }}>Loading saved reports...</div>}
+        {err && <div style={{ color: "#ff7777", fontSize: "13px", letterSpacing: "1px" }}>{err}</div>}
+        {!loading && !err && !sessions.length && (
+          <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(0,212,255,0.14)", borderRadius: "14px", padding: "28px", color: "#7b8faa", textAlign: "center" }}>
+            No saved debates yet. Complete a debate report once and it will appear here.
+          </div>
+        )}
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(260px,1fr))", gap: "14px" }}>
+          {(sessions || []).map(session => (
+            <button key={session.id} onClick={() => onOpenSession(session)}
+              style={{ textAlign: "left", background: "rgba(255,255,255,0.035)", border: "1px solid rgba(0,212,255,0.14)", borderRadius: "12px", padding: "18px", cursor: "pointer", color: "#e8f0ff", fontFamily: "'Courier New',monospace" }}>
+              <div style={{ color: "#00d4ff", fontSize: "10px", letterSpacing: "2px", marginBottom: "8px" }}>
+                {session.created_at ? new Date(session.created_at).toLocaleString() : "SAVED REPORT"}
+              </div>
+              <div style={{ fontSize: "15px", fontWeight: "900", lineHeight: "1.4", marginBottom: "12px" }}>{session.topic}</div>
+              <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", color: "#8aa8c8", fontSize: "11px" }}>
+                <span>{session.position || "POSITION"}</span>
+                <span>{session.difficulty || "DIFFICULTY"}</span>
+                <span>{Number(session.overall_score || 0).toFixed(1)}/10</span>
+              </div>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function LegacyLandingScreen({ onLogin }) {
   const featuresRef = useRef(null);
   const features = [
@@ -964,14 +1052,37 @@ function LegacyLandingScreen({ onLogin }) {
 function LoginScreen({ onLogin }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [mode, setMode] = useState("login");
   const [err, setErr] = useState("");
+  const [saving, setSaving] = useState(false);
 
-  function handleSubmit() {
-    if (!name.trim()) { setErr("Please enter your name."); return; }
+  async function handleSubmit() {
+    if (mode === "signup" && !name.trim()) { setErr("Please enter your name."); return; }
     if (!email.trim() || !email.includes("@")) { setErr("Please enter a valid email."); return; }
-    const user = { name: name.trim(), email: email.trim() };
-    try { localStorage.setItem("debateUser", JSON.stringify(user)); } catch { }
-    onLogin(user);
+    if (password.length < 8) { setErr("Password must be at least 8 characters."); return; }
+    setSaving(true);
+    setErr("");
+    try {
+      const res = await fetch(`${API_BASE}/${mode === "signup" ? "signup" : "login"}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: name.trim(),
+          email: email.trim().toLowerCase(),
+          password,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || "Authentication failed");
+      const user = { ...data.user, access_token: data.access_token };
+      storeAuthUser(user);
+      onLogin(user);
+    } catch (error) {
+      setErr(error.message || "Authentication failed");
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
@@ -985,6 +1096,14 @@ function LoginScreen({ onLogin }) {
           <p style={{ color: "#4a6a8a", fontSize: "13px", margin: 0, letterSpacing: "2px" }}>CHALLENGE AN AI OPPONENT</p>
         </div>
         <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(0,212,255,0.2)", borderRadius: "20px", padding: "32px", backdropFilter: "blur(20px)", boxShadow: "0 0 60px rgba(0,100,255,0.1)" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginBottom: "20px" }}>
+            {["login", "signup"].map(item => (
+              <button key={item} type="button" onClick={() => { setMode(item); setErr(""); }}
+                style={{ background: mode === item ? "rgba(0,212,255,0.16)" : "rgba(255,255,255,0.035)", border: `1px solid ${mode === item ? "rgba(0,212,255,0.55)" : "rgba(255,255,255,0.08)"}`, color: mode === item ? "#00d4ff" : "#6a8aaa", padding: "10px", borderRadius: "8px", cursor: "pointer", fontFamily: "'Courier New',monospace", letterSpacing: "2px", fontSize: "11px", fontWeight: "900", textTransform: "uppercase" }}>
+                {item}
+              </button>
+            ))}
+          </div>
           <div style={{ marginBottom: "18px" }}>
             <label style={{ display: "block", fontSize: "11px", color: "#00d4ff", letterSpacing: "2px", textTransform: "uppercase", marginBottom: "8px" }}>Operative Name</label>
             <input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Jordan Smith"
@@ -1001,21 +1120,29 @@ function LoginScreen({ onLogin }) {
               onFocus={e => e.target.style.borderColor = "rgba(0,212,255,0.6)"}
               onBlur={e => e.target.style.borderColor = "rgba(0,212,255,0.2)"} />
           </div>
+          <div style={{ marginBottom: "22px" }}>
+            <label style={{ display: "block", fontSize: "11px", color: "#00d4ff", letterSpacing: "2px", textTransform: "uppercase", marginBottom: "8px" }}>Password</label>
+            <input value={password} onChange={e => setPassword(e.target.value)} placeholder="At least 8 characters" type="password"
+              onKeyDown={e => e.key === "Enter" && handleSubmit()}
+              style={{ width: "100%", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(0,212,255,0.2)", borderRadius: "10px", color: "#e8f0ff", padding: "12px 16px", fontSize: "14px", outline: "none", boxSizing: "border-box", fontFamily: "'Courier New',monospace", transition: "border-color 0.2s" }}
+              onFocus={e => e.target.style.borderColor = "rgba(0,212,255,0.6)"}
+              onBlur={e => e.target.style.borderColor = "rgba(0,212,255,0.2)"} />
+          </div>
           {err && <div style={{ color: "#ff4444", fontSize: "12px", marginBottom: "16px", letterSpacing: "1px" }}>⚠ {err}</div>}
-          <button onClick={handleSubmit}
-            style={{ width: "100%", background: "linear-gradient(135deg,#00d4ff,#7b2fff)", border: "none", color: "white", padding: "15px", borderRadius: "12px", fontSize: "14px", fontWeight: "700", cursor: "pointer", fontFamily: "'Courier New',monospace", letterSpacing: "3px", transition: "all 0.3s" }}
+          <button onClick={handleSubmit} disabled={saving}
+            style={{ width: "100%", background: "linear-gradient(135deg,#00d4ff,#7b2fff)", border: "none", color: "white", padding: "15px", borderRadius: "12px", fontSize: "14px", fontWeight: "700", cursor: saving ? "wait" : "pointer", fontFamily: "'Courier New',monospace", letterSpacing: "3px", transition: "all 0.3s", opacity: saving ? 0.72 : 1 }}
             onMouseEnter={e => { e.target.style.transform = "translateY(-2px)"; e.target.style.boxShadow = "0 8px 30px rgba(0,212,255,0.4)" }}
             onMouseLeave={e => { e.target.style.transform = "translateY(0)"; e.target.style.boxShadow = "none" }}>
-            ENTER THE ARENA →
+            {saving ? "PLEASE WAIT..." : mode === "signup" ? "CREATE ACCOUNT" : "LOGIN"}
           </button>
-          <p style={{ color: "#2a4a6a", fontSize: "11px", textAlign: "center", marginTop: "14px", marginBottom: 0, letterSpacing: "1px" }}>LOCAL STORAGE ONLY · NO SERVER REQUIRED</p>
+          <p style={{ color: "#2a4a6a", fontSize: "11px", textAlign: "center", marginTop: "14px", marginBottom: 0, letterSpacing: "1px" }}>JWT SECURED HISTORY</p>
         </div>
       </div>
     </div>
   );
 }
 
-function TopicsScreen({ user, onSelectTopic, onLeaderboard, onLogout }) {
+function TopicsScreen({ user, onSelectTopic, onLeaderboard, onHistory, onLogout }) {
   const [customTopic, setCustomTopic] = useState("");
   const [err, setErr] = useState("");
 
@@ -1036,6 +1163,7 @@ function TopicsScreen({ user, onSelectTopic, onLeaderboard, onLogout }) {
           <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
             <span style={{ fontSize: "12px", color: "#4a6a8a", letterSpacing: "1px" }}>OPERATIVE: <span style={{ color: "#00d4ff" }}>{user.name.toUpperCase()}</span></span>
             <button onClick={onLeaderboard} style={{ background: "rgba(255,215,0,0.06)", border: "1px solid rgba(255,215,0,0.2)", color: "#ffd700", padding: "7px 16px", borderRadius: "20px", fontSize: "11px", cursor: "pointer", fontFamily: "'Courier New',monospace", letterSpacing: "1px" }}>🏆 BOARD</button>
+            <button onClick={onHistory} style={{ background: "rgba(0,212,255,0.06)", border: "1px solid rgba(0,212,255,0.2)", color: "#00d4ff", padding: "7px 16px", borderRadius: "20px", fontSize: "11px", cursor: "pointer", fontFamily: "'Courier New',monospace", letterSpacing: "1px" }}>HISTORY</button>
             <button onClick={onLogout} style={{ background: "transparent", border: "1px solid rgba(255,255,255,0.1)", color: "#4a6a8a", padding: "7px 16px", borderRadius: "20px", fontSize: "11px", cursor: "pointer", fontFamily: "'Courier New',monospace", letterSpacing: "1px" }}>LOGOUT</button>
           </div>
         </div>
@@ -1119,7 +1247,7 @@ function PositionScreen({ topic, onChoose, onBack }) {
 }
 
 // ── Main Debate Screen ────────────────────────────────────────────────────────
-function DebateScreen({ topic, position, difficulty, onFinish, onLeaderboard }) {
+function DebateScreen({ user, topic, position, difficulty, onFinish, onLeaderboard }) {
   const [turns, setTurns] = useState([]);
   const [conversationLog, setConversationLog] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -1427,7 +1555,7 @@ function DebateScreen({ topic, position, difficulty, onFinish, onLeaderboard }) 
       formData.append("difficulty", difficulty);
       formData.append("history", JSON.stringify(currentTurns));
 
-      const res = await fetch("http://localhost:8000/debate/voice-turn", { method: "POST", body: formData });
+      const res = await fetch(`${API_BASE}/debate/voice-turn`, { method: "POST", headers: authHeaders(user), body: formData });
       let data = await res.json();
 
       if (data.error) {
@@ -1442,7 +1570,7 @@ function DebateScreen({ topic, position, difficulty, onFinish, onLeaderboard }) 
             fallbackData.append("position", position);
             fallbackData.append("difficulty", difficulty);
             fallbackData.append("history", JSON.stringify(currentTurns));
-            const fallbackRes = await fetch("http://localhost:8000/debate/voice-turn", { method: "POST", body: fallbackData });
+            const fallbackRes = await fetch(`${API_BASE}/debate/voice-turn`, { method: "POST", headers: authHeaders(user), body: fallbackData });
             data = await fallbackRes.json();
           }
         }
@@ -1496,7 +1624,7 @@ function DebateScreen({ topic, position, difficulty, onFinish, onLeaderboard }) 
           window.setTimeout(() => startRecording(), 450);
         }
       };
-      setStatus("💬 Alex will speak in 4 seconds…");
+      setStatus("💬 Alex is starting…");
       alexSpeakTimerRef.current = window.setTimeout(() => {
         alexSpeakTimerRef.current = null;
         setStatus("💬 Alex is speaking…");
@@ -1753,31 +1881,136 @@ function DebateScreen({ topic, position, difficulty, onFinish, onLeaderboard }) 
 
 // ── Root App ──────────────────────────────────────────────────────────────────
 export default function App() {
-  const [user, setUser] = useState(() => {
-    try { return JSON.parse(localStorage.getItem("debateUser")); } catch { return null; }
-  });
+  const [user, setUser] = useState(() => getStoredAuthUser());
   const [screen, setScreen] = useState("landing");
   const [selectedTopic, setSelectedTopic] = useState(null);
   const [position, setPosition] = useState(null);
   const [difficulty, setDifficulty] = useState("medium");
   const [finalTurns, setFinalTurns] = useState([]);
+  const [historySessions, setHistorySessions] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState("");
+  const [saveStatus, setSaveStatus] = useState(null);
+  const savedReportKeyRef = useRef("");
 
-  function handleLogout() { try { localStorage.removeItem("debateUser"); } catch { } setUser(null); setScreen("landing"); }
+  const handleSessionExpired = useCallback(() => {
+    clearAuthUser();
+    setUser(null);
+    setHistorySessions([]);
+    setHistoryError("");
+    setSaveStatus(null);
+    setScreen("login");
+  }, []);
+
+  const loadHistory = useCallback(async () => {
+    if (!user?.access_token) {
+      setHistorySessions([]);
+      setHistoryError(user ? "Please login again to load saved debates." : "");
+      return;
+    }
+    setHistoryLoading(true);
+    setHistoryError("");
+    try {
+      const res = await fetch(`${API_BASE}/debate-sessions`, {
+        headers: authHeaders(user),
+      });
+      const data = await res.json().catch(() => []);
+      if (isAuthExpiredResponse(res, data)) {
+        handleSessionExpired();
+        return;
+      }
+      if (!res.ok) throw new Error(data.detail || "Could not load debate history");
+      setHistorySessions(Array.isArray(data) ? data : []);
+    } catch (error) {
+      setHistoryError(error.message || "Could not load debate history");
+      setHistorySessions([]);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [handleSessionExpired, user]);
+
+  useEffect(() => {
+    if (user?.access_token) loadHistory();
+  }, [user?.access_token, loadHistory]);
+
+  function handleLoginSuccess(nextUser) {
+    setUser(nextUser);
+    storeAuthUser(nextUser);
+    setScreen("topics");
+  }
+  function handleLogout() { clearAuthUser(); setUser(null); setHistorySessions([]); setScreen("landing"); }
   function handleSelectTopic(topic) { setSelectedTopic(topic); setScreen("position"); }
   function handleChoosePosition(pos, diff) { setPosition(pos); setDifficulty(diff); setScreen("debate"); }
-  function handleFinish(turns) { setFinalTurns(turns); setScreen("report"); }
-  function handleRestart() { setScreen("topics"); setSelectedTopic(null); setPosition(null); setFinalTurns([]); }
+  const saveDebateSession = useCallback(async (turns) => {
+    if (!user?.access_token) throw new Error("Please login again before saving history.");
+    if (!selectedTopic?.title || !turns?.length) throw new Error("No completed debate turns were available to save.");
+    const scores = turns.map(t => Number(t.scores?.overall) || 0);
+    const averageScore = scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : 0;
+    const res = await fetch(`${API_BASE}/debate-sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders(user) },
+      body: JSON.stringify({
+        user_name: user.name,
+        user_email: user.email,
+        topic: selectedTopic.title,
+        position,
+        difficulty,
+        turns,
+        report: { averageScore },
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (isAuthExpiredResponse(res, data)) {
+      handleSessionExpired();
+      throw new Error("Your login expired. Please sign in again to save this report.");
+    }
+    if (!res.ok) throw new Error(data.detail || "Could not save this debate report.");
+    await loadHistory();
+    return data;
+  }, [difficulty, handleSessionExpired, loadHistory, position, selectedTopic?.title, user]);
+
+  useEffect(() => {
+    if (screen !== "report" || !finalTurns.length || selectedTopic?.id?.toString().startsWith("saved-")) return;
+    const reportKey = `${selectedTopic?.title || ""}|${position || ""}|${difficulty || ""}|${finalTurns.length}|${finalTurns.map(t => t.userArgument || "").join("|")}`;
+    if (savedReportKeyRef.current === reportKey) return;
+    savedReportKeyRef.current = reportKey;
+    setSaveStatus({ type: "saving", message: "Saving report to MySQL..." });
+    saveDebateSession(finalTurns)
+      .then(() => setSaveStatus({ type: "saved", message: "Saved to MySQL history." }))
+      .catch(error => {
+        savedReportKeyRef.current = "";
+        setSaveStatus({ type: "error", message: error.message || "Could not save this report." });
+      });
+  }, [difficulty, finalTurns, position, saveDebateSession, screen, selectedTopic]);
+
+  function handleFinish(turns) {
+    setFinalTurns(turns);
+    setSaveStatus(null);
+    setScreen("report");
+  }
+  function handleOpenSavedSession(session) {
+    setSelectedTopic({ id: `saved-${session.id}`, title: session.topic, category: "Saved", icon: "ðŸ“Œ" });
+    setPosition(session.position || "FOR");
+    setDifficulty(session.difficulty || "medium");
+    setFinalTurns(session.turns || []);
+    setSaveStatus(null);
+    setScreen("report");
+  }
+  function handleRestart() { setScreen("topics"); setSelectedTopic(null); setPosition(null); setFinalTurns([]); setSaveStatus(null); savedReportKeyRef.current = ""; }
 
   function handleGetStarted() { if (user) { setScreen("topics"); } else { setScreen("login"); } }
-  function handleLoginNav() { setScreen("login"); }
+  function handleLoginNav() { setScreen(user ? "topics" : "login"); }
 
   if (screen === "landing") return <LandingPage onGetStarted={handleGetStarted} onLogin={handleLoginNav} />;
-  if (!user && screen === "login") return <LoginScreen onLogin={u => { setUser(u); setScreen("topics"); }} />;
+  if (screen === "login") return user
+    ? <TopicsScreen user={user} onSelectTopic={handleSelectTopic} onLeaderboard={() => setScreen("leaderboard")} onHistory={() => setScreen("history")} onLogout={handleLogout} />
+    : <LoginScreen onLogin={handleLoginSuccess} />;
   if (!user) return <LandingPage onGetStarted={handleGetStarted} onLogin={handleLoginNav} />;
   if (screen === "leaderboard") return <LeaderboardScreen onBack={() => setScreen(selectedTopic ? "debate" : "topics")} currentUser={user.name} />;
+  if (screen === "history") return <HistoryScreen sessions={historySessions} loading={historyLoading} err={historyError} onBack={() => setScreen("topics")} onOpenSession={handleOpenSavedSession} onRefresh={loadHistory} />;
   if (screen === "combined") return <CombinedResultPage turns={finalTurns} topic={selectedTopic} position={position} onBack={() => setScreen("report")} onRestart={handleRestart} />;
-  if (screen === "report") return <FinalReport turns={finalTurns} topic={selectedTopic} position={position} username={user.name} onRestart={handleRestart} onCombined={() => setScreen("combined")} />;
-  if (screen === "topics") return <TopicsScreen user={user} onSelectTopic={handleSelectTopic} onLeaderboard={() => setScreen("leaderboard")} onLogout={handleLogout} />;
+  if (screen === "report") return <FinalReport turns={finalTurns} topic={selectedTopic} position={position} username={user.name} saveStatus={saveStatus} onRestart={handleRestart} onCombined={() => setScreen("combined")} />;
+  if (screen === "topics") return <TopicsScreen user={user} onSelectTopic={handleSelectTopic} onLeaderboard={() => setScreen("leaderboard")} onHistory={() => setScreen("history")} onLogout={handleLogout} />;
   if (screen === "position") return <PositionScreen topic={selectedTopic} onChoose={handleChoosePosition} onBack={() => setScreen("topics")} />;
   if (screen === "debate") return <DebateScreen user={user} topic={selectedTopic} position={position} difficulty={difficulty} onFinish={handleFinish} onLeaderboard={() => setScreen("leaderboard")} />;
   return null;
