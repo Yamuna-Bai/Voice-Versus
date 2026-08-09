@@ -3,6 +3,11 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import FacialAnalysis from "./FacialAnalysis";
 import ConfidencePanel from "./ConfidencePanel";
 import LandingPage from "./LandingPage";
+import ModeScreen from "./ModeScreen";
+import MultiplayerScreen from "./MultiplayerScreen";
+import WaitingRoom from "./WaitingRoom";
+import MultiplayerDebateScreen from "./MultiplayerDebateScreen";
+import MultiplayerResult from "./MultiplayerResult";
 
 const TOPICS = [
   { id: 1, title: "AI will replace human jobs", category: "Technology", icon: "🤖" },
@@ -1883,15 +1888,20 @@ function DebateScreen({ user, topic, position, difficulty, onFinish, onLeaderboa
 export default function App() {
   const [user, setUser] = useState(() => getStoredAuthUser());
   const [screen, setScreen] = useState("landing");
+  const [multiplayerResult, setMultiplayerResult] =
+  useState(null);
   const [selectedTopic, setSelectedTopic] = useState(null);
   const [position, setPosition] = useState(null);
   const [difficulty, setDifficulty] = useState("medium");
+  const [debateMode, setDebateMode] = useState(null);
   const [finalTurns, setFinalTurns] = useState([]);
   const [historySessions, setHistorySessions] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState("");
   const [saveStatus, setSaveStatus] = useState(null);
   const savedReportKeyRef = useRef("");
+  const [roomId, setRoomId] = useState("");
+  const [playerName, setPlayerName] = useState("");
 
   const handleSessionExpired = useCallback(() => {
     clearAuthUser();
@@ -1939,7 +1949,15 @@ export default function App() {
     setScreen("topics");
   }
   function handleLogout() { clearAuthUser(); setUser(null); setHistorySessions([]); setScreen("landing"); }
-  function handleSelectTopic(topic) { setSelectedTopic(topic); setScreen("position"); }
+  function handleSelectTopic(topic) {
+  setSelectedTopic(topic);
+
+  if (debateMode === "multiplayer") {
+    setScreen("multiplayer");
+  } else {
+    setScreen("position");
+  }
+}
   function handleChoosePosition(pos, diff) { setPosition(pos); setDifficulty(diff); setScreen("debate"); }
   const saveDebateSession = useCallback(async (turns) => {
     if (!user?.access_token) throw new Error("Please login again before saving history.");
@@ -1998,9 +2016,52 @@ export default function App() {
   }
   function handleRestart() { setScreen("topics"); setSelectedTopic(null); setPosition(null); setFinalTurns([]); setSaveStatus(null); savedReportKeyRef.current = ""; }
 
-  function handleGetStarted() { if (user) { setScreen("topics"); } else { setScreen("login"); } }
+  function handleGetStarted() {if (user) {setScreen("mode");} else {setScreen("login");}}
   function handleLoginNav() { setScreen(user ? "topics" : "login"); }
+  function handleSelectMode(mode) {setDebateMode(mode);if (mode === "practice") { setScreen("topics");} else { setScreen("topics");}}
+  function handleRoomCreated(room, player) {
+  setRoomId(room);
+  setPlayerName(player);
+  setScreen("waitingRoom");
+}
 
+function handleRoomJoined(room, player) {
+  setRoomId(room);
+  setPlayerName(player);
+  setScreen("waitingRoom");
+}
+function handleStartDebate() {
+  setScreen("multiplayerDebate");
+}
+
+async function handleDebateFinished() {
+  try {
+    const response = await fetch(
+      `http://127.0.0.1:8000/multiplayer/result/${multiplayerRoomId}?player=${encodeURIComponent(
+        playerName
+      )}`
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      console.error(
+        "Result error:",
+        data
+      );
+      return;
+    }
+
+    setMultiplayerResult(data);
+    setScreen("multiplayer-result");
+
+  } catch (error) {
+    console.error(
+      "Failed to load debate result:",
+      error
+    );
+  }
+}
   if (screen === "landing") return <LandingPage onGetStarted={handleGetStarted} onLogin={handleLoginNav} />;
   if (screen === "login") return user
     ? <TopicsScreen user={user} onSelectTopic={handleSelectTopic} onLeaderboard={() => setScreen("leaderboard")} onHistory={() => setScreen("history")} onLogout={handleLogout} />
@@ -2010,6 +2071,48 @@ export default function App() {
   if (screen === "history") return <HistoryScreen sessions={historySessions} loading={historyLoading} err={historyError} onBack={() => setScreen("topics")} onOpenSession={handleOpenSavedSession} onRefresh={loadHistory} />;
   if (screen === "combined") return <CombinedResultPage turns={finalTurns} topic={selectedTopic} position={position} onBack={() => setScreen("report")} onRestart={handleRestart} />;
   if (screen === "report") return <FinalReport turns={finalTurns} topic={selectedTopic} position={position} username={user.name} saveStatus={saveStatus} onRestart={handleRestart} onCombined={() => setScreen("combined")} />;
+  if (screen === "mode")return ( <ModeScreen  onSelectMode={handleSelectMode} onBack={() => setScreen("landing")} />);
+  if (screen === "multiplayer")
+  return (
+  <MultiplayerScreen
+  selectedTopic={selectedTopic}
+  onBack={() => setScreen("topics")}
+  onRoomCreated={handleRoomCreated}
+  onRoomJoined={handleRoomJoined}
+/>
+  );
+ if (screen === "waitingRoom")
+  return (
+    <WaitingRoom
+      roomId={roomId}
+      playerName={playerName}
+      onStart={handleStartDebate}
+      onBack={() => setScreen("multiplayer")}
+    />
+  );
+ if (screen === "multiplayerDebate")
+  return (
+    <MultiplayerDebateScreen
+      roomId={roomId}
+      playerName={playerName}
+      topic={selectedTopic?.title}
+      opponentName={null}
+    />
+  );
+  if (
+  screen === "multiplayer-result"
+) {
+  return (
+    <MultiplayerResult
+      result={multiplayerResult}
+      playerName={playerName}
+      onContinue={() => {
+        setMultiplayerResult(null);
+        setScreen("mode");
+      }}
+    />
+  );
+}
   if (screen === "topics") return <TopicsScreen user={user} onSelectTopic={handleSelectTopic} onLeaderboard={() => setScreen("leaderboard")} onHistory={() => setScreen("history")} onLogout={handleLogout} />;
   if (screen === "position") return <PositionScreen topic={selectedTopic} onChoose={handleChoosePosition} onBack={() => setScreen("topics")} />;
   if (screen === "debate") return <DebateScreen user={user} topic={selectedTopic} position={position} difficulty={difficulty} onFinish={handleFinish} onLeaderboard={() => setScreen("leaderboard")} />;
