@@ -18,6 +18,7 @@ import os
 from typing import Any
 from backend.models.database import Base, engine, get_db
 from backend.models import models
+from backend.routes.multiplayer import router as multiplayer_router
 
 def ensure_database_schema() -> None:
     Base.metadata.create_all(bind=engine)
@@ -34,7 +35,8 @@ ensure_database_schema()
 
 #
 #  ------------------------------------------------------------------ KEYS
-groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+_groq_api_key = os.getenv("GROQ_API_KEY")
+groq_client = Groq(api_key=_groq_api_key) if _groq_api_key else None
 GROQ_DEBATE_MODEL = os.getenv("GROQ_DEBATE_MODEL", "llama-3.1-8b-instant")
 GROQ_COACH_MODEL = os.getenv("GROQ_COACH_MODEL", GROQ_DEBATE_MODEL)
 GROQ_FALLBACK_MODEL = os.getenv("GROQ_FALLBACK_MODEL", "llama-3.3-70b-versatile")
@@ -45,6 +47,7 @@ JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "10080"))
 bearer_scheme = HTTPBearer(auto_error=False)
 app = FastAPI(title="AI Debate System")
+app.include_router(multiplayer_router)
 
 class UserLoginRequest(BaseModel):
     name: str
@@ -594,7 +597,10 @@ def consume_task_exception(task):
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1108,6 +1114,8 @@ Write only in English.
         # --------------------------------- PARALLEL LLM CALLS
 
         def create_chat_completion(*, model, messages, temperature, max_tokens, **kwargs):
+            if groq_client is None:
+                raise HTTPException(status_code=503, detail="GROQ_API_KEY is required for AI responses")
             try:
                 return groq_client.chat.completions.create(
                     model=model,
