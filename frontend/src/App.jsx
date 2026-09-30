@@ -8,6 +8,9 @@ import MultiplayerScreen from "./MultiplayerScreen";
 import WaitingRoom from "./WaitingRoom";
 import MultiplayerDebateScreen from "./MultiplayerDebateScreen";
 import MultiplayerResult from "./MultiplayerResult";
+import AvailablePlayers from "./AvailablePlayers";
+import MultiplayerTopicSelection from "./MultiplayerTopicSelection";
+
 
 const TOPICS = [
   { id: 1, title: "AI will replace human jobs", category: "Technology", icon: "🤖" },
@@ -19,7 +22,7 @@ const TOPICS = [
 ];
 
 const MAX_TURNS = 5;
-const API_BASE = "http://localhost:8000";
+const API_BASE = "";
 const MAX_SPEAKING_MS = 60000;
 const MIN_RECORDING_MS = 1800;
 const SILENCE_STOP_MS = 4000;
@@ -1061,6 +1064,7 @@ function LoginScreen({ onLogin }) {
   const [mode, setMode] = useState("login");
   const [err, setErr] = useState("");
   const [saving, setSaving] = useState(false);
+  
 
   async function handleSubmit() {
     if (mode === "signup" && !name.trim()) { setErr("Please enter your name."); return; }
@@ -1902,6 +1906,8 @@ export default function App() {
   const savedReportKeyRef = useRef("");
   const [roomId, setRoomId] = useState("");
   const [playerName, setPlayerName] = useState("");
+  const [selectedOpponent, setSelectedOpponent] = useState(null);
+  const [topicSelection, setTopicSelection] = useState(null);
 
   const handleSessionExpired = useCallback(() => {
     clearAuthUser();
@@ -2018,7 +2024,16 @@ export default function App() {
 
   function handleGetStarted() {if (user) {setScreen("mode");} else {setScreen("login");}}
   function handleLoginNav() { setScreen(user ? "topics" : "login"); }
-  function handleSelectMode(mode) {setDebateMode(mode);if (mode === "practice") { setScreen("topics");} else { setScreen("topics");}}
+function handleSelectMode(mode) {
+  setDebateMode(mode);
+
+  if (mode === "practice") {
+    setScreen("topics");
+  } else {
+    setPlayerName(user?.name || "");
+    setScreen("availablePlayers");
+  }
+}
   function handleRoomCreated(room, player) {
   setRoomId(room);
   setPlayerName(player);
@@ -2030,14 +2045,41 @@ function handleRoomJoined(room, player) {
   setPlayerName(player);
   setScreen("waitingRoom");
 }
-function handleStartDebate() {
-  setScreen("multiplayerDebate");
+async function handleStartDebate() {
+  try {
+    const response = await fetch(
+      "/multiplayer/start",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          room_id: roomId,
+        }),
+      }
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      console.error("Failed to start debate:", data);
+      return;
+    }
+
+    console.log("🚀 DEBATE STARTED:", data);
+
+    setScreen("multiplayerDebate");
+
+  } catch (error) {
+    console.error("Start debate error:", error);
+  }
 }
 
 async function handleDebateFinished() {
   try {
     const response = await fetch(
-      `http://127.0.0.1:8000/multiplayer/result/${multiplayerRoomId}?player=${encodeURIComponent(
+      `/multiplayer/result/${roomId}?player=${encodeURIComponent(
         playerName
       )}`
     );
@@ -2045,10 +2087,7 @@ async function handleDebateFinished() {
     const data = await response.json();
 
     if (!response.ok) {
-      console.error(
-        "Result error:",
-        data
-      );
+      console.error("Result error:", data);
       return;
     }
 
@@ -2081,6 +2120,505 @@ async function handleDebateFinished() {
   onRoomJoined={handleRoomJoined}
 />
   );
+ if (screen === "availablePlayers") {
+  return (
+    <AvailablePlayers
+      playerName={playerName}
+      onSelectOpponent={(opponent) => {
+        console.log("MATCH FOUND:", opponent);
+
+        setSelectedOpponent(opponent);
+        setScreen("matchFound");
+      }}
+      onBack={() => setScreen("mode")}
+    />
+  );
+}
+if (screen === "matchFound") {
+  return (
+    <div
+      style={{
+        minHeight: "100vh",
+        width: "100%",
+        boxSizing: "border-box",
+        background:
+          "radial-gradient(circle at 50% -15%, rgba(0,212,255,0.14), transparent 35%), radial-gradient(circle at 85% 20%, rgba(123,47,255,0.11), transparent 28%), #020510",
+        color: "#eef4ff",
+        fontFamily: "'Courier New', monospace",
+        position: "relative",
+        overflow: "hidden",
+        padding: "0 24px 50px",
+      }}
+    >
+      <style>{`
+        .match-grid {
+          position: fixed;
+          inset: 0;
+          pointer-events: none;
+          opacity: 0.35;
+          background-image:
+            linear-gradient(rgba(0,212,255,0.028) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(0,212,255,0.028) 1px, transparent 1px);
+          background-size: 60px 60px;
+        }
+
+        .match-topbar {
+          height: 72px;
+          max-width: 1120px;
+          margin: 0 auto;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          border-bottom: 1px solid rgba(90,140,255,0.14);
+          position: relative;
+          z-index: 2;
+        }
+
+        .match-brand {
+          display: flex;
+          align-items: center;
+          gap: 11px;
+        }
+
+        .match-logo {
+          width: 38px;
+          height: 38px;
+          border-radius: 10px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          background: linear-gradient(135deg, #00d9ff, #715cff);
+          box-shadow: 0 0 22px rgba(0,217,255,0.25);
+          font-size: 18px;
+        }
+
+        .match-brand-name {
+          font-size: 16px;
+          font-weight: 900;
+          letter-spacing: 3px;
+        }
+
+        .match-brand-name span {
+          color: #00d9ff;
+        }
+
+        .match-brand-sub {
+          margin-top: 3px;
+          color: #667695;
+          font-size: 8px;
+          letter-spacing: 2px;
+        }
+
+        .match-main {
+          position: relative;
+          z-index: 1;
+          max-width: 900px;
+          margin: 0 auto;
+          padding-top: 55px;
+        }
+
+        .match-heading {
+          text-align: center;
+          margin-bottom: 30px;
+        }
+
+        .match-kicker {
+          color: #00d9ff;
+          font-size: 10px;
+          letter-spacing: 4px;
+          margin-bottom: 13px;
+        }
+
+        .match-title {
+          margin: 0;
+          font-size: clamp(38px, 7vw, 68px);
+          font-weight: 900;
+          letter-spacing: 5px;
+          background: linear-gradient(
+            90deg,
+            #00d4ff 0%,
+            #7b2fff 50%,
+            #00d4ff 100%
+          );
+          background-size: 200% auto;
+          -webkit-background-clip: text;
+          -webkit-text-fill-color: transparent;
+        }
+
+        .match-subtitle {
+          margin: 14px 0 0;
+          color: #667796;
+          font-size: 11px;
+          letter-spacing: 2px;
+        }
+
+        .match-card {
+          background: rgba(9,14,28,0.86);
+          border: 1px solid rgba(0,217,255,0.16);
+          border-radius: 22px;
+          padding: 30px;
+          box-shadow:
+            0 25px 70px rgba(0,0,0,0.34),
+            0 0 45px rgba(0,100,255,0.05);
+          backdrop-filter: blur(14px);
+        }
+
+        .match-card-top {
+          text-align: center;
+          padding-bottom: 22px;
+          border-bottom: 1px solid rgba(255,255,255,0.06);
+        }
+
+        .match-confirmed {
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          padding: 7px 13px;
+          border-radius: 999px;
+          border: 1px solid rgba(0,255,170,0.22);
+          background: rgba(0,255,170,0.05);
+          color: #00ffaa;
+          font-size: 8px;
+          font-weight: 900;
+          letter-spacing: 2px;
+        }
+
+        .match-status-dot {
+          width: 7px;
+          height: 7px;
+          border-radius: 50%;
+          background: #00ffaa;
+          box-shadow: 0 0 14px rgba(0,255,170,0.7);
+        }
+
+        .match-players {
+          margin-top: 27px;
+          display: grid;
+          grid-template-columns: minmax(0,1fr) 90px minmax(0,1fr);
+          gap: 18px;
+          align-items: center;
+        }
+
+        .match-player {
+          min-height: 220px;
+          border-radius: 18px;
+          padding: 24px 18px;
+          display: flex;
+          flex-direction: column;
+          justify-content: center;
+          align-items: center;
+          text-align: center;
+        }
+
+        .match-player.you {
+          background:
+            linear-gradient(
+              145deg,
+              rgba(0,48,72,0.72),
+              rgba(4,15,29,0.96)
+            );
+          border: 1px solid rgba(0,217,255,0.28);
+          box-shadow: inset 0 0 35px rgba(0,217,255,0.025);
+        }
+
+        .match-player.opponent {
+          background:
+            linear-gradient(
+              145deg,
+              rgba(39,17,72,0.68),
+              rgba(10,7,25,0.96)
+            );
+          border: 1px solid rgba(123,47,255,0.26);
+          box-shadow: inset 0 0 35px rgba(123,47,255,0.025);
+        }
+
+        .match-player-label {
+          font-size: 8px;
+          letter-spacing: 3px;
+          margin-bottom: 15px;
+        }
+
+        .match-player.you .match-player-label {
+          color: #00d9ff;
+        }
+
+        .match-player.opponent .match-player-label {
+          color: #927cff;
+        }
+
+        .match-avatar {
+          width: 76px;
+          height: 76px;
+          border-radius: 50%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 30px;
+          margin-bottom: 16px;
+        }
+
+        .match-player.you .match-avatar {
+          background: rgba(0,217,255,0.07);
+          border: 1px solid rgba(0,217,255,0.30);
+          box-shadow: 0 0 22px rgba(0,217,255,0.08);
+        }
+
+        .match-player.opponent .match-avatar {
+          background: rgba(123,47,255,0.08);
+          border: 1px solid rgba(123,47,255,0.30);
+          box-shadow: 0 0 22px rgba(123,47,255,0.07);
+        }
+
+        .match-player-name {
+          color: #eef4ff;
+          font-size: 17px;
+          font-weight: 900;
+          letter-spacing: 1px;
+          word-break: break-word;
+        }
+
+        .match-player-role {
+          margin-top: 8px;
+          color: #657796;
+          font-size: 9px;
+          letter-spacing: 2px;
+        }
+
+        .match-vs {
+          width: 62px;
+          height: 62px;
+          margin: 0 auto;
+          border-radius: 50%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          background: rgba(90,55,175,0.11);
+          border: 1px solid rgba(123,47,255,0.42);
+          color: #927cff;
+          font-size: 11px;
+          font-weight: 900;
+          letter-spacing: 2px;
+          box-shadow: 0 0 25px rgba(123,47,255,0.07);
+        }
+
+        .match-message {
+          margin-top: 24px;
+          text-align: center;
+          color: #8292ad;
+          font-size: 10px;
+          letter-spacing: 1.4px;
+        }
+
+        .match-action {
+          margin-top: 26px;
+          display: flex;
+          justify-content: center;
+        }
+
+        .match-continue {
+          min-width: 260px;
+          padding: 14px 24px;
+          border: none;
+          border-radius: 10px;
+          background: linear-gradient(135deg, #00d9ff, #715cff);
+          color: white;
+          font-family: 'Courier New', monospace;
+          font-size: 10px;
+          font-weight: 900;
+          letter-spacing: 2px;
+          cursor: pointer;
+          box-shadow: 0 0 30px rgba(0,217,255,0.18);
+          transition: 0.2s ease;
+        }
+
+        .match-continue:hover {
+          transform: translateY(-3px);
+          box-shadow: 0 0 38px rgba(0,217,255,0.28);
+        }
+
+        .match-footer {
+          margin-top: 18px;
+          text-align: center;
+          color: #485a76;
+          font-size: 8px;
+          letter-spacing: 1.5px;
+        }
+
+        @media (max-width: 700px) {
+          .match-topbar {
+            height: 66px;
+          }
+
+          .match-main {
+            padding-top: 38px;
+          }
+
+          .match-card {
+            padding: 20px;
+          }
+
+          .match-players {
+            grid-template-columns: 1fr;
+            gap: 12px;
+          }
+
+          .match-vs {
+            width: 48px;
+            height: 48px;
+          }
+
+          .match-player {
+            min-height: 180px;
+          }
+
+          .match-title {
+            letter-spacing: 3px;
+          }
+        }
+      `}</style>
+
+      <div className="match-grid" />
+
+      {/* TOP BAR */}
+      <header className="match-topbar">
+        <div className="match-brand">
+          <div className="match-logo">🎙</div>
+
+          <div>
+            <div className="match-brand-name">
+              VOICE <span>VERSUS</span>
+            </div>
+
+            <div className="match-brand-sub">
+              AI DEBATE ARENA
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <main className="match-main">
+        <section className="match-heading">
+          <div className="match-kicker">
+            [ OPPONENT ACCEPTED ]
+          </div>
+
+          <h1 className="match-title">
+            MATCH FOUND
+          </h1>
+
+          <p className="match-subtitle">
+            Your opponent has accepted the challenge.
+          </p>
+        </section>
+
+        <section className="match-card">
+          <div className="match-card-top">
+            <div className="match-confirmed">
+              <span className="match-status-dot" />
+              MATCH CONFIRMED
+            </div>
+          </div>
+
+          <div className="match-players">
+            {/* YOU */}
+            <div className="match-player you">
+              <div className="match-player-label">
+                YOU
+              </div>
+
+              <div className="match-avatar">
+                👤
+              </div>
+
+              <div className="match-player-name">
+                {playerName}
+              </div>
+
+              <div className="match-player-role">
+                PLAYER 01
+              </div>
+            </div>
+
+            {/* VS */}
+            <div className="match-vs">
+              VS
+            </div>
+
+            {/* OPPONENT */}
+            <div className="match-player opponent">
+              <div className="match-player-label">
+                OPPONENT
+              </div>
+
+              <div className="match-avatar">
+                👤
+              </div>
+
+              <div className="match-player-name">
+                {selectedOpponent?.name}
+              </div>
+
+              <div className="match-player-role">
+                PLAYER 02
+              </div>
+            </div>
+          </div>
+
+          <div className="match-message">
+            NEXT STEP: SELECT YOUR PREFERRED DEBATE TOPICS
+          </div>
+
+          <div className="match-action">
+            <button
+              className="match-continue"
+              onClick={() => {
+                setScreen("multiplayerTopicSelection");
+              }}
+              type="button"
+            >
+              CONTINUE TO TOPIC SELECTION →
+            </button>
+          </div>
+
+          <div className="match-footer">
+            BOTH PLAYERS WILL CHOOSE THEIR PREFERRED TOPICS
+          </div>
+        </section>
+      </main>
+    </div>
+  );
+}
+if (screen === "multiplayerTopicSelection") {
+  return (
+    <MultiplayerTopicSelection
+      playerName={playerName || user?.name}
+      opponentName={selectedOpponent?.name}
+      onTopicSelected={(data) => {
+        console.log("🎯 TOPIC + ROOM READY:", data);
+
+        const currentPlayer = playerName || user?.name;
+
+        setSelectedTopic({
+          id: `multiplayer-${data.room_id}`,
+          title: data.selected_topic,
+        });
+
+        setPosition(
+          data.sides?.[currentPlayer] || null
+        );
+
+        setRoomId(data.room_id);
+
+        setPlayerName(currentPlayer);
+
+        setTopicSelection(data);
+
+        setScreen("waitingRoom");
+      }}
+      onBack={() => setScreen("matchFound")}
+    />
+  );
+}
  if (screen === "waitingRoom")
   return (
     <WaitingRoom
@@ -2090,25 +2628,36 @@ async function handleDebateFinished() {
       onBack={() => setScreen("multiplayer")}
     />
   );
- if (screen === "multiplayerDebate")
+if (screen === "multiplayerDebate")
   return (
     <MultiplayerDebateScreen
       roomId={roomId}
       playerName={playerName}
       topic={selectedTopic?.title}
-      opponentName={null}
+      opponentName={selectedOpponent?.name}
+      onDebateFinished={handleDebateFinished}
     />
   );
-  if (
-  screen === "multiplayer-result"
-) {
+if (screen === "multiplayer-result") {
   return (
     <MultiplayerResult
       result={multiplayerResult}
       playerName={playerName}
-      onContinue={() => {
+
+      onRematch={() => {
         setMultiplayerResult(null);
-        setScreen("mode");
+        setRoomId("");
+        setSelectedTopic(null);
+        setPosition(null);
+        setScreen("availablePlayers");
+      }}
+
+      onHome={() => {
+        setMultiplayerResult(null);
+        setRoomId("");
+        setSelectedTopic(null);
+        setPosition(null);
+        setScreen("topics");
       }}
     />
   );

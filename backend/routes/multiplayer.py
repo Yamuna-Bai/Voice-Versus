@@ -1,5 +1,7 @@
+import traceback
+import asyncio
 from urllib import response
-
+import threading
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 import os
 import httpx
@@ -7,6 +9,7 @@ from pydantic import BaseModel
 from uuid import uuid4
 import time
 from dotenv import load_dotenv
+from backend.services.topic_selection_service import select_debate_topic
 
 load_dotenv()
 
@@ -40,6 +43,15 @@ class SignalRequest(BaseModel):
 
 rooms = {}
 signals = {}
+available_players = {}
+challenges = {}
+topic_selections = {}
+topic_selection_locks = {}
+
+
+# Prevent both players from running the AI judge simultaneously
+evaluation_locks = {}
+
 TURN_DURATION = 20
 MAX_ROUNDS = 1
 
@@ -73,6 +85,389 @@ def update_turn(room):
         return
 
     room["round"] = (room["current_turn"] // 2) + 1
+    
+@router.post("/online")
+def player_online(player_name: str):
+    available_players[player_name] = {
+        "name": player_name,
+        "status": "available",
+    }
+
+    return {
+        "success": True,
+        "player": available_players[player_name],
+    }
+    
+@router.post("/offline")
+def player_offline(player_name: str):
+    available_players.pop(player_name, None)
+
+    return {
+        "success": True,
+    }
+    
+@router.get("/players")
+def get_available_players():
+    return {
+        "players": list(available_players.values())
+    }
+    
+@router.post("/challenge")
+def send_challenge(challenger: str, opponent: str):
+    # Check that both players are available
+    if challenger not in available_players:
+        raise HTTPException(
+            status_code=400,
+            detail="Challenger is not available"
+        )
+
+    if opponent not in available_players:
+        raise HTTPException(
+            status_code=400,
+            detail="Opponent is no longer available"
+        )
+
+    # Prevent challenging yourself
+    if challenger == opponent:
+        raise HTTPException(
+            status_code=400,
+            detail="You cannot challenge yourself"
+        )
+
+    # Create challenge ID
+    challenge_id = f"{challenger}__{opponent}"
+
+    challenges[challenge_id] = {
+        "challenge_id": challenge_id,
+        "challenger": challenger,
+        "opponent": opponent,
+        "status": "pending",
+    }
+
+    return {
+        "success": True,
+        "challenge": challenges[challenge_id],
+    }
+    
+@router.get("/challenges/{player_name}")
+def get_player_challenges(player_name: str):
+    incoming = []
+
+    for challenge in challenges.values():
+        if (
+            challenge["opponent"] == player_name
+            and challenge["status"] == "pending"
+        ):
+            incoming.append(challenge)
+
+    return {
+        "challenges": incoming
+    }
+    
+@router.post("/challenge/respond")
+def respond_to_challenge(
+    challenge_id: str,
+    player_name: str,
+    accept: bool
+):
+    challenge = challenges.get(challenge_id)
+
+    if not challenge:
+        raise HTTPException(
+            status_code=404,
+            detail="Challenge not found"
+        )
+
+    if challenge["opponent"] != player_name:
+        raise HTTPException(
+            status_code=403,
+            detail="You are not the challenged player"
+        )
+
+    if challenge["status"] != "pending":
+        raise HTTPException(
+            status_code=400,
+            detail="Challenge is no longer pending"
+        )
+
+    if accept:
+        challenge["status"] = "accepted"
+
+        # Both players are now matched.
+        available_players.pop(
+            challenge["challenger"],
+            None
+        )
+
+        available_players.pop(
+            challenge["opponent"],
+            None
+        )
+
+    else:
+        challenge["status"] = "declined"
+
+    return {
+        "success": True,
+        "challenge": challenge,
+    }
+    
+@router.get("/challenge/{challenge_id}")
+def get_challenge(challenge_id: str):
+    challenge = challenges.get(challenge_id)
+
+    if not challenge:
+        raise HTTPException(
+            status_code=404,
+            detail="Challenge not found"
+        )
+
+    return {
+        "challenge": challenge
+    }
+@router.post("/topic-selection")
+def submit_topic_selection(
+    player_name: str,
+    opponent_name: str,
+    topics: list[str]
+):
+    key = "__".join(
+        sorted([player_name, opponent_name])
+    )
+
+    # Create a lock for this player pair
+    if key not in topic_selection_locks:
+        topic_selection_locks[key] = threading.Lock()
+
+    lock = topic_selection_locks[key]
+
+    with lock:
+
+        # -------------------------------------------------
+        # CREATE TOPIC SELECTION STATE
+        # -------------------------------------------------
+
+        if key not in topic_selections:
+            topic_selections[key] = {
+                "players": [
+                    player_name,
+                    opponent_name
+                ],
+                "selections": {},
+                "common_topics": [],
+                "selected_topic": None,
+                "sides": {},
+                "status": "waiting",
+                "room_id": None,
+            }
+
+        selection = topic_selections[key]
+
+        # -------------------------------------------------
+        # IMPORTANT:
+        # IF ROOM ALREADY EXISTS, RETURN THE SAME ROOM
+        # -------------------------------------------------
+
+        if (
+            selection.get("status") == "topic_selected"
+            and selection.get("room_id")
+        ):
+            return {
+                "success": True,
+                "status": "topic_selected",
+                "common_topics":
+                    selection.get(
+                        "common_topics",
+                        []
+                    ),
+                "selected_topic":
+                    selection.get(
+                        "selected_topic"
+                    ),
+                "sides":
+                    selection.get(
+                        "sides",
+                        {}
+                    ),
+                "room_id":
+                    selection.get(
+                        "room_id"
+                    ),
+            }
+
+        # -------------------------------------------------
+        # STORE THIS PLAYER'S TOPICS
+        # -------------------------------------------------
+
+        selection["selections"][
+            player_name
+        ] = topics
+
+        selections = selection["selections"]
+
+        # -------------------------------------------------
+        # WAIT FOR BOTH PLAYERS
+        # -------------------------------------------------
+
+        if len(selections) < 2:
+            return {
+                "success": True,
+                "status": "waiting",
+                "message":
+                    "Waiting for the other player.",
+            }
+
+        # -------------------------------------------------
+        # GET BOTH TOPIC LISTS
+        # -------------------------------------------------
+
+        player_topics = selections[
+            player_name
+        ]
+
+        opponent_topics = selections[
+            opponent_name
+        ]
+
+        # -------------------------------------------------
+        # FIND COMMON TOPICS
+        # -------------------------------------------------
+
+        common_topics = list(
+            set(player_topics).intersection(
+                opponent_topics
+            )
+        )
+
+        selection["common_topics"] = common_topics
+
+        # -------------------------------------------------
+        # NO COMMON TOPIC
+        # -------------------------------------------------
+
+        if not common_topics:
+            selection["status"] = "no_common_topic"
+
+            return {
+                "success": True,
+                "status": "no_common_topic",
+                "common_topics": [],
+            }
+
+        # -------------------------------------------------
+        # AI SELECTS ONE COMMON TOPIC
+        # -------------------------------------------------
+
+        selected_topic = select_debate_topic(
+            common_topics
+        )
+
+        # -------------------------------------------------
+        # ASSIGN SIDES
+        # -------------------------------------------------
+
+        sides = {
+            player_name: "FOR",
+            opponent_name: "AGAINST",
+        }
+
+        # -------------------------------------------------
+        # CREATE ONE SHARED ROOM
+        # -------------------------------------------------
+
+        room_id = str(
+            uuid4()
+        )[:6].upper()
+
+        rooms[room_id] = {
+            "room_id": room_id,
+            "host": player_name,
+
+            "players": [
+                {
+                    "name": player_name,
+                    "ready": False,
+                    "score": 0,
+                    "side": sides[player_name],
+                },
+                {
+                    "name": opponent_name,
+                    "ready": False,
+                    "score": 0,
+                    "side": sides[opponent_name],
+                },
+            ],
+
+            "status": "ready",
+            "topic": selected_topic,
+
+            "current_turn": 0,
+            "round": 1,
+            "max_rounds": MAX_ROUNDS,
+            "turn_duration": TURN_DURATION,
+            "turn_started_at": None,
+
+            "messages": [],
+            "winner": None,
+            "evaluation": None,
+        }
+
+        # -------------------------------------------------
+        # SAVE SHARED MATCH STATE
+        # -------------------------------------------------
+
+        selection["common_topics"] = common_topics
+        selection["selected_topic"] = selected_topic
+        selection["sides"] = sides
+        selection["room_id"] = room_id
+        selection["status"] = "topic_selected"
+
+        print(
+            "✅ SHARED MATCH CREATED:",
+            room_id
+        )
+
+        print(
+            "👥 PLAYERS:",
+            player_name,
+            "VS",
+            opponent_name
+        )
+
+        print(
+            "🗣️ TOPIC:",
+            selected_topic
+        )
+
+        # -------------------------------------------------
+        # RETURN SAME ROOM TO BOTH PLAYERS
+        # -------------------------------------------------
+
+        return {
+            "success": True,
+            "status": "topic_selected",
+            "common_topics": common_topics,
+            "selected_topic": selected_topic,
+            "sides": sides,
+            "room_id": room_id,
+        }
+    
+@router.get("/topic-selection/{player_name}/{opponent_name}")
+def get_topic_selection(
+    player_name: str,
+    opponent_name: str
+):
+    key = "__".join(sorted([player_name, opponent_name]))
+
+    selection = topic_selections.get(key)
+
+    if not selection:
+        raise HTTPException(
+            status_code=404,
+            detail="Topic selection not found"
+        )
+
+    return selection
 
 @router.post("/create-room")
 def create_room(req: CreateRoomRequest):
@@ -159,12 +554,18 @@ def get_room(room_id: str):
     room = rooms[room_id]
 
     print(
-        "🏠 ROOM STATE:",
-        room_id,
-        "PLAYERS:",
-        len(room["players"]),
-        room["players"]
-    )
+    "🏠 ROOM STATE:",
+    room_id,
+    "STATUS:",
+    room["status"],
+    "TURN:",
+    room["current_turn"],
+    "TURN_STARTED:",
+    room["turn_started_at"],
+    "PLAYERS:",
+    len(room["players"]),
+    room["players"]
+)
 
     response = {
         "room_id": room["room_id"],
@@ -502,41 +903,59 @@ async def get_debate_result(
             "message": "Debate is still in progress."
         }
 
-    # Generate evaluation only once
-    if not room.get("evaluation"):
+    # Generate evaluation only once.
+    if room_id not in evaluation_locks:
+        evaluation_locks[room_id] = asyncio.Lock()
 
-        if len(room["players"]) < 2:
-            raise HTTPException(
-                status_code=400,
-                detail="Not enough players"
-            )
+    async with evaluation_locks[room_id]:
+        # Check again after acquiring the lock. Another player may have
+        # already generated the evaluation.
+        if not room.get("evaluation"):
+            if len(room["players"]) < 2:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Not enough players"
+                )
 
-        try:
-            evaluation = await judge_multiplayer_debate(
-                topic=room["topic"],
-                players=room["players"],
-                messages=room["messages"],
-            )
+            try:
+                print(
+                    "🤖 GENERATING AI EVALUATION FOR ROOM:",
+                    room_id
+                )
 
-        except Exception as e:
+                evaluation = await judge_multiplayer_debate(
+                    topic=room["topic"],
+                    players=room["players"],
+                    messages=room["messages"],
+                )
+
+            except Exception as e:
+                print("====================================")
+                print("❌ MULTIPLAYER JUDGE ERROR")
+                print("ROOM:", room_id)
+                print("ERROR TYPE:", type(e).__name__)
+                print("ERROR:", repr(e))
+                traceback.print_exc()
+                print("====================================")
+
+                raise HTTPException(
+                    status_code=500,
+                    detail="Could not evaluate debate"
+                )
+
+            if "error" in evaluation:
+                raise HTTPException(
+                    status_code=500,
+                    detail=evaluation["error"]
+                )
+
+            room["evaluation"] = evaluation
+            room["winner"] = evaluation.get("winner")
+
             print(
-                "MULTIPLAYER JUDGE ERROR:",
-                e
+                "✅ AI EVALUATION SAVED FOR ROOM:",
+                room_id
             )
-
-            raise HTTPException(
-                status_code=500,
-                detail="Could not evaluate debate"
-            )
-
-        if "error" in evaluation:
-            raise HTTPException(
-                status_code=500,
-                detail=evaluation["error"]
-            )
-
-        room["evaluation"] = evaluation
-        room["winner"] = evaluation.get("winner")
 
     evaluation = room["evaluation"]
 
@@ -553,12 +972,28 @@ async def get_debate_result(
             detail="Player is not part of this room"
         )
 
+    print(
+        "🔎 EVALUATION PLAYERS:",
+        evaluation.get("players", {})
+    )
+
+    print(
+        "🔎 REQUESTED PLAYER:",
+        player
+    )
+
+    print(
+        "🔎 AVAILABLE PLAYER NAMES:",
+        list(
+            evaluation.get("players", {}).keys()
+        )
+    )
+
     player_result = (
         evaluation
         .get("players", {})
         .get(player)
     )
-
     if not player_result:
         raise HTTPException(
             status_code=404,
