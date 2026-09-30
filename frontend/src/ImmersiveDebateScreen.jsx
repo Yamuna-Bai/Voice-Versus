@@ -190,7 +190,7 @@ export default function ImmersiveDebateScreen({ user, topic, position, difficult
         formData.append("difficulty", difficulty);
         formData.append("history", JSON.stringify(turns));
 
-        const res = await fetch("http://localhost:8000/debate/voice-turn", { method:"POST", body:formData });
+        const res = await fetch("/debate/voice-turn", { method:"POST", body:formData });
         const data = await res.json();
 
         if (data.error) { setStatus("❌ " + data.error); setLoading(false); setIsThinking(false); return; }

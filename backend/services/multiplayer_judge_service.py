@@ -1,5 +1,6 @@
 import asyncio
 
+
 from backend.services.llm import (
     chat_text,
     coerce_json_object,
@@ -64,6 +65,9 @@ For EACH player evaluate:
 4. Relevance
 5. Logic and reasoning
 6. Clarity and persuasiveness
+7. Supporting evidence used by the player
+8. Counterarguments made against the opponent
+9. Weak points in the player's arguments
 
 IMPORTANT:
 - Rebuttal strength means how effectively the player responded to the opponent's arguments.
@@ -73,6 +77,14 @@ IMPORTANT:
 - Evaluate the quality of the actual arguments.
 
 Return ONLY valid JSON in exactly this structure:
+IMPORTANT OUTPUT RULES:
+- Return ONLY the JSON object.
+- Do NOT write any explanation before the JSON.
+- Do NOT write any explanation after the JSON.
+- Do NOT use Markdown code fences.
+- Do NOT use ```json.
+- The response must begin with {{ and end with }}.
+- Use valid JSON with double quotes around all keys and string values.
 
 {{
   "players": {{
@@ -84,38 +96,74 @@ Return ONLY valid JSON in exactly this structure:
       "relevance": 8,
       "logic": 8,
       "clarity": 8,
+
+      "supporting_evidence": [
+        "Used a relevant example to support the argument.",
+        "Connected the claim with a practical situation."
+      ],
+
+      "counterarguments": [
+        "Responded to the opponent's main point.",
+        "Could have addressed the opposing argument more directly."
+      ],
+
+      "weak_points": [
+        "Some claims were not supported with enough evidence.",
+        "The argument could have been more specific."
+      ],
+
       "strengths": [
         "...",
         "...",
         "..."
       ],
+
       "improvements": [
         "...",
         "...",
         "..."
       ],
+
       "feedback": "...",
       "coach_tip": "..."
     }},
 
     "PLAYER_NAME_2": {{
-      "score": 7,
-      "argument_quality": 7,
-      "evidence_use": 6,
-      "rebuttal_strength": 7,
+      "score": 8,
+      "argument_quality": 8,
+      "evidence_use": 7,
+      "rebuttal_strength": 9,
       "relevance": 8,
-      "logic": 7,
-      "clarity": 7,
+      "logic": 8,
+      "clarity": 8,
+
+      "supporting_evidence": [
+        "Used a relevant example to support the argument.",
+        "Connected the claim with a practical situation."
+      ],
+
+      "counterarguments": [
+        "Responded to the opponent's main point.",
+        "Could have addressed the opposing argument more directly."
+      ],
+
+      "weak_points": [
+        "Some claims were not supported with enough evidence.",
+        "The argument could have been more specific."
+      ],
+
       "strengths": [
         "...",
         "...",
         "..."
       ],
+
       "improvements": [
         "...",
         "...",
         "..."
       ],
+
       "feedback": "...",
       "coach_tip": "..."
     }}
@@ -130,6 +178,9 @@ Rules:
 - Every score must be between 1 and 10.
 - Give 2-3 strengths.
 - Give 2-3 improvements.
+- Give 2-3 supporting evidence points.
+- Give 2-3 counterargument points.
+- Give 2-3 weak points.
 - Feedback must be short and useful.
 - Coach tip must be one actionable sentence.
 - Choose the winner based on overall debate quality.
@@ -145,14 +196,30 @@ Rules:
 
         raw = await asyncio.to_thread(
             chat_text,
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-20b",
             system=None,
             user=prompt,
             temperature=0.2,
-            max_tokens=700,
+            max_tokens=1600,
         )
 
-        evaluation = coerce_json_object(raw)
+        print("====================================")
+        print("🤖 RAW AI JUDGE RESPONSE:")
+        print(raw)
+        print("====================================")
+
+        try:
+            evaluation = coerce_json_object(raw)
+        except Exception as e:
+            print("====================================")
+            print("❌ JSON PARSING FAILED")
+            print("ERROR:", repr(e))
+            print("RAW RESPONSE:", raw)
+            print("====================================")
+
+            return {
+                "error": f"Could not parse JSON object: {e}"
+            }
 
         # --------------------------------------------------
         # VALIDATE PLAYER RESULTS
@@ -245,6 +312,30 @@ Rules:
             clarity = safe_score(
                 "clarity"
             )
+            
+            supporting_evidence = player_result.get(
+                "supporting_evidence",
+                []
+            )
+
+            counterarguments = player_result.get(
+                "counterarguments",
+                []
+            )
+
+            weak_points = player_result.get(
+                "weak_points",
+                []
+            )
+
+            if not isinstance(supporting_evidence, list):
+                supporting_evidence = []
+
+            if not isinstance(counterarguments, list):
+                counterarguments = []
+
+            if not isinstance(weak_points, list):
+                weak_points = []
 
             # -----------------------------
             # STRENGTHS
@@ -300,6 +391,15 @@ Rules:
 
                 "clarity":
                     clarity,
+
+                "supporting_evidence":
+                    supporting_evidence,
+
+                "counterarguments":
+                    counterarguments,
+
+                "weak_points":
+                    weak_points,
 
                 "strengths":
                     strengths,

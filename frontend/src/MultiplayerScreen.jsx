@@ -1,6 +1,5 @@
 import React, { useState } from "react";
-
-const API = "http://localhost:8000";
+const API = "";
 
 export default function MultiplayerScreen({
   selectedTopic,
