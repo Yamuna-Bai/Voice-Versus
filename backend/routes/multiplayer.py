@@ -263,37 +263,19 @@ def submit_topic_selection(
 
         selection = topic_selections[key]
 
-        # -------------------------------------------------
-        # IMPORTANT:
-        # IF ROOM ALREADY EXISTS, RETURN THE SAME ROOM
-        # -------------------------------------------------
-
-        if (
-            selection.get("status") == "topic_selected"
-            and selection.get("room_id")
-        ):
-            return {
-                "success": True,
-                "status": "topic_selected",
-                "common_topics":
-                    selection.get(
-                        "common_topics",
-                        []
-                    ),
-                "selected_topic":
-                    selection.get(
-                        "selected_topic"
-                    ),
-                "sides":
-                    selection.get(
-                        "sides",
-                        {}
-                    ),
-                "room_id":
-                    selection.get(
-                        "room_id"
-                    ),
-            }
+        # A player pair can start another match later. Clear the completed
+        # selection before recording the new choices so an old topic/room
+        # cannot be reused for the next debate.
+        if selection.get("status") in {
+            "topic_selected",
+            "no_common_topic",
+        }:
+            selection["selections"] = {}
+            selection["common_topics"] = []
+            selection["selected_topic"] = None
+            selection["sides"] = {}
+            selection["status"] = "waiting"
+            selection["room_id"] = None
 
         # -------------------------------------------------
         # STORE THIS PLAYER'S TOPICS

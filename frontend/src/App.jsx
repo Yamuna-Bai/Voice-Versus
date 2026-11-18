@@ -22,17 +22,17 @@ const TOPICS = [
 ];
 
 const MAX_TURNS = 5;
-const API_BASE = "";
-const MAX_SPEAKING_MS = 60000;
+const API_BASE = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
+const MAX_SPEAKING_MS = 180000;
 const MIN_RECORDING_MS = 1800;
-const SILENCE_STOP_MS = 4000;
+const SILENCE_STOP_MS = 7000;
 const SPEECH_GRACE_MS = 1400;
 const NOISE_CALIBRATION_MS = 1300;
 const MIN_VOICE_RMS_THRESHOLD = 0.009;
 const NOISE_GATE_MULTIPLIER = 1.55;
 const MAX_DEMO_VOICE_THRESHOLD = 0.038;
-const VOICE_DROP_SILENCE_RATIO = 0.42;
-const NO_SPEECH_AUTO_STOP_MS = 8500;
+const VOICE_DROP_SILENCE_RATIO = 0.28;
+const NO_SPEECH_AUTO_STOP_MS = 30000;
 const SPEAKER_HANDOFF_DELAY_MS = 80;
 const MIC_AUDIO_CONSTRAINTS = {
   audio: {
@@ -1285,7 +1285,6 @@ function DebateScreen({ user, topic, position, difficulty, onFinish, onLeaderboa
   const maxTurnTimerRef = useRef(null);
   const silenceFrameRef = useRef(null);
   const audioContextRef = useRef(null);
-  const micFilterContextRef = useRef(null);
   const speechInterruptedRef = useRef(false);
   const alexSpeakTimerRef = useRef(null);
 
@@ -1310,9 +1309,6 @@ function DebateScreen({ user, topic, position, difficulty, onFinish, onLeaderboa
   }, []);
 
   // ── Auto-finish after MAX_TURNS
-  useEffect(() => {
-    if (turns.length >= MAX_TURNS) setTimeout(() => onFinish(turns), 1800);
-  }, [onFinish, turns]);
 
   // ── Load voices
   useEffect(() => {
@@ -1332,53 +1328,10 @@ function DebateScreen({ user, topic, position, difficulty, onFinish, onLeaderboa
     if (audioContextRef.current) { audioContextRef.current.close().catch(() => { }); audioContextRef.current = null; }
   }
 
-  function cleanupMicFilter() {
-    if (micFilterContextRef.current) {
-      micFilterContextRef.current.close().catch(() => { });
-      micFilterContextRef.current = null;
-    }
-  }
-
   function clearAlexSpeakTimer() {
     if (alexSpeakTimerRef.current) {
       clearTimeout(alexSpeakTimerRef.current);
       alexSpeakTimerRef.current = null;
-    }
-  }
-
-  function createFilteredMicStream(rawStream) {
-    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContextClass) return rawStream;
-
-    try {
-      const audioContext = new AudioContextClass();
-      micFilterContextRef.current = audioContext;
-      const source = audioContext.createMediaStreamSource(rawStream);
-      const highPass = audioContext.createBiquadFilter();
-      const lowPass = audioContext.createBiquadFilter();
-      const compressor = audioContext.createDynamicsCompressor();
-      const destination = audioContext.createMediaStreamDestination();
-
-      highPass.type = "highpass";
-      highPass.frequency.value = 90;
-      highPass.Q.value = 0.7;
-      lowPass.type = "lowpass";
-      lowPass.frequency.value = 7800;
-      lowPass.Q.value = 0.7;
-      compressor.threshold.value = -48;
-      compressor.knee.value = 24;
-      compressor.ratio.value = 3;
-      compressor.attack.value = 0.008;
-      compressor.release.value = 0.18;
-
-      source.connect(highPass);
-      highPass.connect(lowPass);
-      lowPass.connect(compressor);
-      compressor.connect(destination);
-      return destination.stream;
-    } catch {
-      cleanupMicFilter();
-      return rawStream;
     }
   }
 
@@ -1418,7 +1371,10 @@ function DebateScreen({ user, topic, position, difficulty, onFinish, onLeaderboa
       );
       const speechStartThreshold = Math.max(voiceThreshold, MIN_VOICE_RMS_THRESHOLD * 1.65);
       const speechContinueThreshold = speechStarted
-        ? Math.max(voiceThreshold, voicePeakRms * VOICE_DROP_SILENCE_RATIO)
+        ? Math.max(
+          MIN_VOICE_RMS_THRESHOLD,
+          Math.min(speechStartThreshold * 0.65, voicePeakRms * VOICE_DROP_SILENCE_RATIO)
+        )
         : speechStartThreshold;
       const hasVoice = !calibrating && rms > speechContinueThreshold;
       if (hasVoice) {
@@ -1450,7 +1406,6 @@ function DebateScreen({ user, topic, position, difficulty, onFinish, onLeaderboa
         mediaRecorderRef.current.stop();
         mediaRecorderRef.current.stream?.getTracks().forEach(t => t.stop());
         mediaRecorderRef.current.rawStream?.getTracks().forEach(t => t.stop());
-        cleanupMicFilter();
       }
       setRecording(false);
       recordingRef.current = false;
@@ -1505,8 +1460,7 @@ function DebateScreen({ user, topic, position, difficulty, onFinish, onLeaderboa
     if (!faceReady) { setStatus("🚫 Face not detected — please look at camera first"); return; }
     try {
       const rawStream = await navigator.mediaDevices.getUserMedia(MIC_AUDIO_CONSTRAINTS);
-      const stream = createFilteredMicStream(rawStream);
-      const rec = new MediaRecorder(stream, MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? { mimeType: "audio/webm;codecs=opus" } : {});
+      const rec = new MediaRecorder(rawStream, MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? { mimeType: "audio/webm;codecs=opus" } : {});
       rec.rawStream = rawStream;
       mediaRecorderRef.current = rec;
       audioChunksRef.current = [];
@@ -1517,8 +1471,8 @@ function DebateScreen({ user, topic, position, difficulty, onFinish, onLeaderboa
       setRecordingTime(0);
       setRecording(true);
       recordingRef.current = true;
-      setStatus("🔊 Listening in demo noise mode — speak close, click again to submit");
-      beginAutoStopDetection(stream);
+      setStatus("🔊 Listening — finish your point, then pause for Alex to respond");
+      beginAutoStopDetection(rawStream);
     } catch (err) {
       setStatus("❌ Mic error: " + err.message);
     }
@@ -1527,18 +1481,18 @@ function DebateScreen({ user, topic, position, difficulty, onFinish, onLeaderboa
   async function stopRecording() {
     cleanupRecordingWatchers();
     return new Promise(resolve => {
-      if (!mediaRecorderRef.current || mediaRecorderRef.current.state === "inactive") {
-        mediaRecorderRef.current?.rawStream?.getTracks().forEach(t => t.stop());
-        cleanupMicFilter();
+      const recorder = mediaRecorderRef.current;
+      if (!recorder || recorder.state === "inactive") {
+        recorder?.rawStream?.getTracks().forEach(t => t.stop());
         resolve(new Blob(audioChunksRef.current, { type: "audio/webm" })); return;
       }
-      mediaRecorderRef.current.onstop = () => {
-        resolve(new Blob(audioChunksRef.current, { type: mediaRecorderRef.current.mimeType || "audio/webm" }));
+      recorder.onstop = () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: recorder.mimeType || "audio/webm" });
+        recorder.stream.getTracks().forEach(t => t.stop());
+        recorder.rawStream?.getTracks().forEach(t => t.stop());
+        resolve(audioBlob);
       };
-      mediaRecorderRef.current.stop();
-      mediaRecorderRef.current.stream.getTracks().forEach(t => t.stop());
-      mediaRecorderRef.current.rawStream?.getTracks().forEach(t => t.stop());
-      cleanupMicFilter();
+      recorder.stop();
       setRecording(false);
       recordingRef.current = false;
       setRecordingTime(0);
@@ -1629,6 +1583,12 @@ function DebateScreen({ user, topic, position, difficulty, onFinish, onLeaderboa
       utt.onend = () => {
         if (speechInterruptedRef.current) { speechInterruptedRef.current = false; return; }
         setIsSpeaking(false); setStatus(""); setLoading(false);
+        if (nextTurns.length >= MAX_TURNS) {
+          autoDebateRef.current = false;
+          setStatus("Debate complete — here is your report");
+          onFinish(nextTurns);
+          return;
+        }
         if (autoDebateRef.current && nextTurns.length < MAX_TURNS && !faceOutRef.current) {
           window.setTimeout(() => startRecording(), 450);
         }
@@ -1952,7 +1912,7 @@ export default function App() {
   function handleLoginSuccess(nextUser) {
     setUser(nextUser);
     storeAuthUser(nextUser);
-    setScreen("topics");
+    setScreen("mode");
   }
   function handleLogout() { clearAuthUser(); setUser(null); setHistorySessions([]); setScreen("landing"); }
   function handleSelectTopic(topic) {
@@ -2023,7 +1983,7 @@ export default function App() {
   function handleRestart() { setScreen("topics"); setSelectedTopic(null); setPosition(null); setFinalTurns([]); setSaveStatus(null); savedReportKeyRef.current = ""; }
 
   function handleGetStarted() {if (user) {setScreen("mode");} else {setScreen("login");}}
-  function handleLoginNav() { setScreen(user ? "topics" : "login"); }
+  function handleLoginNav() { setScreen(user ? "mode" : "login"); }
 function handleSelectMode(mode) {
   setDebateMode(mode);
 
@@ -2044,6 +2004,23 @@ function handleRoomJoined(room, player) {
   setRoomId(room);
   setPlayerName(player);
   setScreen("waitingRoom");
+}
+function handleMultiplayerHome() {
+  setMultiplayerResult(null);
+  setRoomId("");
+  setSelectedTopic(null);
+  setSelectedOpponent(null);
+  setPosition(null);
+  setScreen("mode");
+}
+
+function handleMultiplayerRematch() {
+  setMultiplayerResult(null);
+  setRoomId("");
+  setSelectedTopic(null);
+  setSelectedOpponent(null);
+  setPosition(null);
+  setScreen("availablePlayers");
 }
 async function handleStartDebate() {
   try {
@@ -2636,6 +2613,8 @@ if (screen === "multiplayerDebate")
       topic={selectedTopic?.title}
       opponentName={selectedOpponent?.name}
       onDebateFinished={handleDebateFinished}
+      onHome={handleMultiplayerHome}
+      onRematch={handleMultiplayerRematch}
     />
   );
 if (screen === "multiplayer-result") {
@@ -2644,21 +2623,8 @@ if (screen === "multiplayer-result") {
       result={multiplayerResult}
       playerName={playerName}
 
-      onRematch={() => {
-        setMultiplayerResult(null);
-        setRoomId("");
-        setSelectedTopic(null);
-        setPosition(null);
-        setScreen("availablePlayers");
-      }}
-
-      onHome={() => {
-        setMultiplayerResult(null);
-        setRoomId("");
-        setSelectedTopic(null);
-        setPosition(null);
-        setScreen("topics");
-      }}
+      onRematch={handleMultiplayerRematch}
+      onHome={handleMultiplayerHome}
     />
   );
 }

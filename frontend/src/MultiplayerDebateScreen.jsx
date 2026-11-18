@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import MultiplayerResult from "./MultiplayerResult";
 
-const API = "";
+const API = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
 
 export default function MultiplayerDebateScreen({
   roomId,
@@ -9,9 +9,13 @@ export default function MultiplayerDebateScreen({
   topic,
   opponentName,
   onDebateFinished,
+  onHome,
+  onRematch,
 })  {
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
+  const remoteAudioRef = useRef(null);
+  const remoteStreamRef = useRef(null);
 
   const peerConnectionRef = useRef(null);
   const localStreamRef = useRef(null);
@@ -175,16 +179,14 @@ const [resultError, setResultError] = useState("");
       data.remaining_seconds ?? 0
     );
 
-    // Debate has finished
+    // Let App switch to its existing result flow.
     if (
       data.status === "finished" &&
       !resultRequestedRef.current
     ) {
       resultRequestedRef.current = true;
 
-      if (
-        typeof onDebateFinished === "function"
-      ) {
+      if (typeof onDebateFinished === "function") {
         onDebateFinished();
       }
     }
@@ -197,7 +199,7 @@ const [resultError, setResultError] = useState("");
   }
 }
 
-async function onDebateFinished() {
+async function loadDebateResult() {
   try {
     setResultLoading(true);
     setResultError("");
@@ -285,6 +287,14 @@ async function onDebateFinished() {
     return () => {
       if (interval) clearInterval(interval);
       if (roomInterval) clearInterval(roomInterval);
+      if (peerConnectionRef.current) {
+        peerConnectionRef.current.close();
+        peerConnectionRef.current = null;
+      }
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach((track) => track.stop());
+        localStreamRef.current = null;
+      }
     };
   }, [roomId, playerName]);
   // ---------------------------------------------------------
@@ -310,6 +320,31 @@ async function onDebateFinished() {
   };
 
 pc.ontrack = (event) => {
+  // Send remote audio to a dedicated audio element. Keeping playback separate
+  // from the video element prevents video autoplay state from muting speech.
+  if (remoteAudioRef.current) {
+  const remoteStream = event.streams[0] || remoteStreamRef.current || new MediaStream();
+  if (!event.streams[0] && !remoteStream.getTracks().some((track) => track.id === event.track.id)) {
+    remoteStream.addTrack(event.track);
+  }
+  remoteStreamRef.current = remoteStream;
+
+  if (remoteVideoRef.current) {
+    remoteVideoRef.current.srcObject = remoteStream;
+    remoteVideoRef.current.play().catch((error) => {
+      console.error("Remote video play error:", error);
+    });
+  }
+
+  if (remoteAudioRef.current) {
+    remoteAudioRef.current.srcObject = remoteStream;
+    remoteAudioRef.current.play().catch((error) => {
+      console.error("Remote audio play error:", error);
+    });
+  }
+    return;
+  }
+
   console.log(
     "🎥 REMOTE TRACK RECEIVED:",
     event.track.kind,
@@ -444,12 +479,6 @@ async function sendSignal(type, data) {
           video: true,
           audio: true,
         });
-
-        stream
-  .getAudioTracks()
-  .forEach((track) => {
-    track.enabled = false;
-  });
 
       localStreamRef.current = stream;
 
@@ -1142,9 +1171,8 @@ if (showResult) {
     <MultiplayerResult
       result={debateResult}
       playerName={playerName}
-      onContinue={() => {
-        window.location.reload();
-      }}
+      onHome={onHome}
+      onRematch={onRematch}
     />
   );
 }
@@ -1398,6 +1426,7 @@ return (
           ref={remoteVideoRef}
           autoPlay
           playsInline
+          muted
           style={{
             width: "100%",
             height: "100%",
@@ -1406,6 +1435,7 @@ return (
             display: "block",
           }}
         />
+        <audio ref={remoteAudioRef} autoPlay playsInline />
 
         {/* DARK VIDEO GRADIENT */}
 

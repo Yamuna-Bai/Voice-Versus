@@ -97,6 +97,15 @@ export default function MultiplayerResult({
 
   const score = result.result || {};
 
+  function handleHomeClick() {
+    if (typeof onHome === "function") {
+      onHome();
+      return;
+    }
+
+    window.location.assign("/");
+  }
+
   const overallScore = Number(
     score.overall ?? score.score
   ) || 0;
@@ -1490,7 +1499,7 @@ export default function MultiplayerResult({
         <div className="mv-action">
           <button
             className="mv-home"
-            onClick={onHome}
+            onClick={handleHomeClick}
             type="button"
           >
             ⌂ BACK TO HOME

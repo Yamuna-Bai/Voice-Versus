@@ -28,7 +28,7 @@ No extra text. Just JSON."""
 
     raw = await asyncio.to_thread(
         chat_text,
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-20b",
         system=None,
         user=prompt,
         temperature=0.0,

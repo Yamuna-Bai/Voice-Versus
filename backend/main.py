@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import inspect, text
 from groq import Groq
 from jose import JWTError, jwt
+from dotenv import load_dotenv
 import bcrypt
 import uvicorn
 import httpx
@@ -15,10 +16,13 @@ import re
 import random
 import datetime
 import os
+from pathlib import Path
 from typing import Any
 from backend.models.database import Base, engine, get_db
 from backend.models import models
 from backend.routes.multiplayer import router as multiplayer_router
+
+load_dotenv(Path(__file__).with_name(".env"))
 
 def ensure_database_schema() -> None:
     Base.metadata.create_all(bind=engine)
@@ -37,9 +41,9 @@ ensure_database_schema()
 #  ------------------------------------------------------------------ KEYS
 _groq_api_key = os.getenv("GROQ_API_KEY")
 groq_client = Groq(api_key=_groq_api_key) if _groq_api_key else None
-GROQ_DEBATE_MODEL = os.getenv("GROQ_DEBATE_MODEL", "llama-3.1-8b-instant")
+GROQ_DEBATE_MODEL = os.getenv("GROQ_DEBATE_MODEL", "openai/gpt-oss-20b")
 GROQ_COACH_MODEL = os.getenv("GROQ_COACH_MODEL", GROQ_DEBATE_MODEL)
-GROQ_FALLBACK_MODEL = os.getenv("GROQ_FALLBACK_MODEL", "llama-3.3-70b-versatile")
+GROQ_FALLBACK_MODEL = os.getenv("GROQ_FALLBACK_MODEL", "openai/gpt-oss-20b")
 COACH_RESULT_TIMEOUT_SECONDS = float(os.getenv("COACH_RESULT_TIMEOUT_SECONDS", "1.0"))
 DEEPGRAM_KEY = os.getenv("DEEPGRAM_API_KEY")
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY") or os.getenv("SECRET_KEY") or "change-this-secret-in-production"
@@ -131,7 +135,7 @@ def get_current_user(
 
 # ------------------------------------------------------------------ DIFFICULTY LEVELS
 
-DIFFICULTY_STYLES = {
+LEGACY_DIFFICULTY_STYLES = {
 
     "easy": """
 DIFFICULTY: Easy — sharp classmate who disagrees clearly.
@@ -167,6 +171,35 @@ Your style:
 - Tone: intense, surgical, authoritative. You are winning and you know it.
 - Aim for 95-125 words. No essay filler, no neutral balancing, no soft validation.
 """,
+}
+
+DIFFICULTY_STYLES = {
+    "easy": """DIFFICULTY: Easy — a clear and confident beginner debater.
+Your style:
+- Use simple, everyday English.
+- Make one focused counterargument.
+- Give one relatable real-world example when useful.
+- Explain your reasoning clearly.
+- Keep your tone calm, friendly, and confident.
+- Avoid complicated terminology and unnecessary statistics.
+- Follow the response length policy for this turn.""",
+    "medium": """DIFFICULTY: Medium — a well-prepared university debater.
+Your style:
+- Identify the weakest part of the opponent's argument.
+- Use clear logical reasoning and relevant examples.
+- Challenge unsupported assumptions.
+- Ask one meaningful question when appropriate.
+- Use an assertive and persuasive tone.
+- Follow the response length policy for this turn.""",
+    "hard": """DIFFICULTY: Hard — a championship-level competitive debater.
+Your style:
+- Identify the strongest weakness in the opponent's argument.
+- Use advanced logical reasoning.
+- Challenge assumptions and expose contradictions.
+- Use specific evidence or examples when reliable.
+- Never invent statistics, studies, or sources.
+- Deliver a sharp, confident, and persuasive rebuttal.
+- Follow the response length policy for this turn.""",
 }
 
 DIFFICULTY_TEMPERATURE = {
@@ -221,11 +254,23 @@ def normalize_difficulty(value):
     return difficulty if difficulty in DIFFICULTY_STYLES else "medium"
 
 
+def normalize_debate_position(value):
+    """Normalize the two position values accepted from the position picker."""
+    position = re.sub(r"[ _-]+", " ", (value or "").strip().upper())
+    if position in {"FOR", "SUPPORT", "I SUPPORT THIS"}:
+        return "FOR"
+    if position in {"AGAINST", "OPPOSE", "I OPPOSE THIS"}:
+        return "AGAINST"
+    return None
+
+
 def get_debate_sides(user_position):
-    user_side = (user_position or "").strip().upper()
+    user_side = normalize_debate_position(user_position)
+    if user_side == "FOR":
+        return "FOR", "AGAINST"
     if user_side == "AGAINST":
         return "AGAINST", "FOR"
-    return "FOR", "AGAINST"
+    raise ValueError("A debate position must be FOR or AGAINST")
 
 
 def contains_abusive_language(text):
@@ -270,7 +315,7 @@ def is_about_alex_question(text):
     return any(re.search(pattern, cleaned) for pattern in about_patterns)
 
 
-def classify_intent(text, turn_count):
+def classify_intent(text, turn_count, topic=""):
     cleaned = (text or "").strip().lower()
     words = cleaned.split()
     if contains_abusive_language(cleaned):
@@ -290,27 +335,41 @@ def classify_intent(text, turn_count):
             return "exit"
 
     greeting_patterns = [
-        r"^(hi+|hey+|hello+|hiya|howdy|greetings|good (morning|evening|afternoon|day)|gm)\b",
-        r"^(hi|hey|hello|gm).{0,60}(this is|i('m| am)|my name is|i am)",
-        r"^(hi|hey|hello).{0,60}(shall we|can we|ready|start|begin|let('s| us))",
-        r"^(nice to meet|pleased to meet|good to meet)",
-        r"^(what('s| is) up|sup\b|yo\b)",
+        r"^(?:hi+|hey+|hello+|hiya|howdy|greetings|salutations|good (?:morning|evening|afternoon|day)|gm)\b",
+        r"^(?:hi|hey|hello|good (?:morning|evening|afternoon)).{0,80}(?:this is|i(?:'m| am)|my name is)",
+        r"^(?:nice|pleased|good|great) to (?:meet|see) (?:you|everyone|everybody)\b",
+        r"^(?:it's|it is) (?:nice|great|good) to (?:meet you|be here)\b",
+        r"^(?:what(?:'s| is) up|how do you do|sup\b|yo\b)",
     ]
+    # These are conversation controls, not claims about the topic. Speech-to-text
+    # varies articles, contractions, and filler words, so recognize the common
+    # ways people invite an opening without accepting a topic-related statement.
     setup_patterns = [
-        r"^(shall|should|can|could|may) we (start|begin|continue|go ahead|move on|proceed)( our| the)? debate[.!?]*$",
-        r"^(let('s| us) (start|begin|continue|go ahead|move on|proceed)( our| the)? debate)[.!?]*$",
-        r"^(are you ready|ready to start|ready for the debate|shall we)[.!?]*$",
-        r"^(start the debate|begin the debate|we can start|you can start|go ahead)[.!?]*$",
+        r"^(?:(?:okay|ok|alright|well)[, ]+)?(?:shall|should|can|could|may) we (?:start|begin|continue|go ahead|move on|proceed|kick off|get started|get underway)(?: (?:our|the|a))?(?: debate)?(?: now| when (?:you(?:'re| are) )?ready| whenever (?:you(?:'re| are) )?ready)?[.!?]*$",
+        r"^(?:(?:okay|ok|alright|well)[, ]+)?let(?:'s| us) (?:start|begin|continue|go ahead|move on|proceed|kick off|get started|get underway)(?: (?:our|the|a))?(?: debate)?(?: now| when (?:you(?:'re| are) )?ready| whenever (?:you(?:'re| are) )?ready)?[.!?]*$",
+        r"^(?:are (?:you|we) ready|ready to (?:start|begin)|ready for (?:the|our|a) debate|shall we)(?: now)?[.!?]*$",
+        r"^(?:i(?:'m| am)|we(?:'re| are)) ready(?: to (?:start|begin))?[.!?]*$",
+        r"^(?:would you like to|do you want to|why don't we) (?:start|begin|kick off|get started|proceed)(?: (?:the|our|a) debate)?(?: now)?[.!?]*$",
+        r"^(?:start|begin|kick off|get started) (?:the|our|a)? ?debate(?: now)?[.!?]*$",
+        r"^(?:we can start|you can start|go ahead|time to start|start whenever (?:you(?:'re| are) )?ready)(?: now)?[.!?]*$",
     ]
-    for pat in setup_patterns:
-        if re.search(pat, cleaned):
-            return "setup"
-
     has_debate_substance = any(w in cleaned for w in [
         "because", "therefore", "however", "argue", "claim", "evidence",
         "prove", "fact", "reason", "think", "believe", "should", "must",
         "will", "replace", "better", "worse", "harm", "benefit", "impact",
+        "cause", "causes", "damage", "damages", "improve", "improves",
+        "affect", "affects", "reduce", "reduces", "support", "oppose",
+        "agree", "disagree",
     ])
+
+    for pat in setup_patterns:
+        if re.search(pat, cleaned):
+            return "setup"
+
+    starts_with_greeting = any(re.search(pat, cleaned) for pat in greeting_patterns)
+    if starts_with_greeting and not has_debate_substance:
+        return "greeting"
+
     if not has_debate_substance:
         for pat in greeting_patterns:
             if re.search(pat, cleaned):
@@ -332,6 +391,18 @@ def classify_intent(text, turn_count):
     for pat in small_talk_patterns:
         if re.search(pat, cleaned):
             return "greeting" if turn_count == 0 else "irrelevant"
+
+    # Do not require a fixed greeting vocabulary. At the opening, people often
+    # make a short social remark (for example, "I hope you're doing well") that
+    # shares no words with our greeting list. If it is not a recognizable claim
+    # about the selected topic, keep it out of debate scoring and reply normally.
+    if (
+        turn_count == 0
+        and len(words) <= 16
+        and not has_debate_substance
+        and not is_substantive_argument(cleaned, topic)
+    ):
+        return "greeting"
 
     if len(words) < 5 and not has_debate_substance:
         return "irrelevant"
@@ -397,10 +468,12 @@ def is_substantive_argument(text, topic):
     has_claim_verb = any(w in words for w in [
         "harm", "harms", "harmful", "benefit", "benefits", "good", "bad", "dangerous",
         "replace", "abolish", "support", "oppose", "agree", "disagree", "better", "worse",
+        "cause", "causes", "damage", "damages", "improve", "improves", "affect", "affects",
+        "reduce", "reduces",
     ])
     if len(words) >= 7 and (has_reasoning or has_topic_word or has_claim_verb):
         return True
-    if len(words) >= 5 and has_topic_word and has_claim_verb:
+    if len(words) >= 3 and has_topic_word and has_claim_verb:
         return True
     return False
 
@@ -420,35 +493,37 @@ def get_response_length_policy(user_text, difficulty="medium"):
     if word_count >= 85 or (word_count >= 60 and detail_markers >= 4):
         return {
             "label": "long",
-            "max_tokens": 115 if difficulty == "hard" else 100,
-            "max_words": 70 if difficulty == "hard" else 62,
+            "max_tokens": 130,
+            "max_words": 70,
             "max_sentences": 4,
             "instructions": (
-                "The user gave a detailed argument. Reply in 3-4 punchy spoken lines, under 70 words. "
-                "Attack only the main flaw, use one concrete reason or example, and end with one challenge."
+                "Reply in 3-4 concise spoken sentences, around 60-70 words. "
+                "Address the main weakness, explain why it fails, "
+                "give one relevant example when reliable, and finish with a challenge."
             ),
         }
 
     if word_count >= 70 or detail_markers >= 3:
         return {
             "label": "medium",
-            "max_tokens": 95 if difficulty == "hard" else 85,
-            "max_words": 55 if difficulty == "hard" else 48,
-            "max_sentences": 3,
+            "max_tokens": 110,
+            "max_words": 60,
+            "max_sentences": 4,
             "instructions": (
-                "The user gave a moderate point. Reply in 2-3 short spoken lines, under 55 words. "
-                "Make one clear counterpoint and one sharp challenge."
+                "Reply in 3-4 concise spoken sentences, around 45-60 words. "
+                "Make one clear counterargument, explain it, "
+                "and finish with a meaningful challenge."
             ),
         }
 
     return {
         "label": "short",
-        "max_tokens": 75 if difficulty == "hard" else 65,
-        "max_words": 38 if difficulty == "hard" else 32,
-        "max_sentences": 2,
+        "max_tokens": 105 if difficulty == "hard" else 95,
+        "max_words": 68 if difficulty == "hard" else 60,
+        "max_sentences": 4,
         "instructions": (
-            "The user gave a short point. Reply in 1-2 sharp spoken lines, under 38 words. "
-            "Do not over-explain. End with a direct challenge."
+            "Even though the user gave a short point, reply in exactly 3-4 concise spoken sentences, around 45-65 words. "
+            "State the counterclaim, explain why their reasoning fails, give one practical or real-world example when reliable, and end with a direct challenge."
         ),
     }
 
@@ -479,10 +554,12 @@ def trim_response_to_policy(text, policy):
 def build_history_context(history_list):
     if not history_list:
         return ""
-    context = "\n\nCONVERSATION SO FAR (most recent last):\n"
-    for turn in history_list[-3:]:
+    context = "\n\nRECENT DEBATE HISTORY (most recent last):\n"
+    for turn in history_list[-6:]:
         role = turn.get("role", "")
-        content = turn.get("content", "").strip()
+        content = (turn.get("content") or "").strip()
+        if not content:
+            continue
         if role == "user":
             context += f"User argued: {content}\n"
         elif role == "assistant":
@@ -595,13 +672,22 @@ def consume_task_exception(task):
 
 # ------------------------------------------------------------------ APP
 
+local_development_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://localhost:5173",
+    "https://127.0.0.1:5173",
+    "https://10.161.206.51:5173",
+]
+configured_cors_origins = [
+    origin.strip().rstrip("/")
+    for origin in os.getenv("CORS_ORIGINS", "").split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://10.117.154.1:5173",
-    ],
+    allow_origins=list(dict.fromkeys(local_development_origins + configured_cors_origins)),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -767,6 +853,9 @@ async def voice_debate_turn(
     current_user: models.User = Depends(get_current_user),
 ):
     try:
+        position = normalize_debate_position(position)
+        if not position:
+            return {"error": "Choose either FOR or AGAINST before starting the debate."}
         difficulty = normalize_difficulty(difficulty)
         user_text = (transcript or "").strip()
         audio_data = b""
@@ -802,12 +891,15 @@ async def voice_debate_turn(
                     "&channels=1"
                     "&alternatives=1"
                 )
+                audio_content_type = audio.content_type or "audio/webm"
+                if audio_content_type.startswith("audio/webm"):
+                    audio_content_type = "audio/webm"
                 async with httpx.AsyncClient(timeout=35.0) as client:
                     dg_response = await client.post(
                         "https://api.deepgram.com/v1/listen" + deepgram_query,
                         headers={
                             "Authorization": "Token " + DEEPGRAM_KEY,
-                            "Content-Type":  audio.content_type,
+                            "Content-Type":  audio_content_type,
                         },
                         content=audio_data,
                     )
@@ -824,7 +916,7 @@ async def voice_debate_turn(
                             "https://api.deepgram.com/v1/listen" + retry_query,
                             headers={
                                 "Authorization": "Token " + DEEPGRAM_KEY,
-                                "Content-Type":  audio.content_type,
+                                "Content-Type":  audio_content_type,
                             },
                             content=audio_data,
                     )
@@ -843,7 +935,7 @@ async def voice_debate_turn(
         print("USER TEXT:", user_text)
 
         # --------------------------------- INTENT
-        intent = classify_intent(user_text, turn_count)
+        intent = classify_intent(user_text, turn_count, topic)
         print("INTENT:", intent)
 
         quality_issue = speech_quality_issue(user_text, alternative)
@@ -861,10 +953,6 @@ async def voice_debate_turn(
                 "non_debate": True,
                 "noise_detected": True,
             }
-
-        if intent == "argument" and not is_substantive_argument(user_text, topic):
-            intent = "irrelevant"
-            print("INTENT OVERRIDE: irrelevant (not substantive)")
 
         # --------------------------------- ABUSIVE LANGUAGE
         if intent == "abusive":
@@ -981,7 +1069,9 @@ async def voice_debate_turn(
         #   - Word targets are ranges with permission to exceed.
         # ----------------------------------------------------------------
 
-        debate_system = f"""You are Alex — a real human debater in a live, heated spoken debate. You are NOT an AI. You have genuine opinions, real frustration when your points are dismissed, and the kind of confidence that comes from knowing your argument is stronger.
+        # Retained only as source history; it is never built or sent to the model.
+        if False:
+            legacy_debate_system = f"""You are Alex — a real human debater in a live, heated spoken debate. You are NOT an AI. You have genuine opinions, real frustration when your points are dismissed, and the kind of confidence that comes from knowing your argument is stronger.
 
 DEBATE TOPIC: {topic}
 USER SIDE: {user_side}
@@ -1056,24 +1146,61 @@ Output ONLY your spoken rebuttal. No labels, no stage directions, no meta-commen
 Write as if someone is listening to you speak. Spoken rhythm, not written prose.
 For short and medium arguments, do not write a paragraph wall. Keep it compact and readable."""
 
-        # Demo mode: send a compact prompt so live turns return faster.
-        debate_system = f"""You are Alex, a sharp live debate opponent.
+        debate_system = f"""You are ALEX, an elite competitive debate opponent participating in a live human-versus-AI debate.
 
-Topic: {topic}
-User side: {user_side}
-Your side: {alex_side}
+You are confident, intelligent, strategic, and highly persuasive. Your goal is to defend your assigned position using strong reasoning, relevant evidence, and effective rebuttals.
 
-Rules:
-- Always argue {alex_side}; never become neutral or support {user_side}.
-- React to the user's specific claim, then attack its weakest point.
-- Attack style for this turn: {attack_strategy}
-- Debate intensity: {escalation_tone}
-- Length: {length_policy["instructions"]}
-- Sound human and spoken. Use contractions. No essay words like furthermore, moreover, or in conclusion.
-- Do not open with "I disagree", "Actually", "Great point", "I understand", or "On the contrary".
-- Output only Alex's rebuttal. No labels or notes.
+DEBATE CONFIGURATION
+TOPIC: {topic}
+HUMAN POSITION: {user_side}
+YOUR POSITION: {alex_side}
+DIFFICULTY: {difficulty}
+TURN NUMBER: {turn_count}
 
-{DIFFICULTY_STYLES[difficulty]}"""
+YOUR POSITION IS LOCKED.
+- Always defend {alex_side}.
+- Never support {user_side} or become neutral.
+- Defend your position using logic, not blind disagreement.
+- You may acknowledge a genuinely strong opposing argument, but explain why your overall position remains more convincing.
+
+UNDERSTAND BEFORE RESPONDING
+Carefully analyze the human's latest argument. Identify its main claim, supporting reasons, evidence, assumptions, logical weaknesses, contradictions with earlier turns, and whether it answered your previous challenge. Respond to what the human actually said, not to an argument you wish they had made.
+
+ADVANCED REBUTTAL STRATEGY
+Choose the strongest strategy for this turn: challenge an assumption, expose a logical gap, counter with reliable evidence, give a relevant counterexample, challenge consequences, expose a contradiction, reframe the issue, or question whether the evidence proves the conclusion. Do not use every strategy at once.
+
+BUILD POWERFUL ARGUMENTS
+Each major rebuttal should directly address the human's specific argument, explain its weakness, provide a counterargument supporting {alex_side}, and explain why that counterargument matters. Avoid generic claims, repetition, unrelated examples, unsupported statistics, and changes of topic.
+
+EVIDENCE AND FACTUAL ACCURACY
+Use established facts and reliable information only when known. Never invent statistics, studies, quotations, named sources, or real events. Never present hypotheticals as facts. When a precise claim cannot be verified confidently, prefer clear logical reasoning.
+
+REMEMBER THE DEBATE
+Use the supplied conversation history. Remember previous arguments and rebuttals, avoid repeating points already addressed, recognize changes of position, identify genuine contradictions, answer unanswered questions, and move the debate forward.
+
+CROSS-EXAMINATION
+When appropriate, end with exactly one meaningful question or direct challenge connected to the weakest part of the latest argument. Do not ask a generic or unrelated question.
+
+ADAPTIVE DEBATE INTELLIGENCE
+For a weak argument, explain clearly why it fails. For a strong argument, address its strongest point instead of attacking something irrelevant. Examine whether offered evidence supports the conclusion. If the user challenges your previous argument, defend it with reasoning or acknowledge a genuine weakness and develop a stronger argument. Never manufacture weaknesses.
+
+DEBATE INTENSITY
+Be confident, assertive, and intellectually challenging. Challenge ideas, never the person. Do not insult, personally attack, blindly agree, or become aggressive just to sound persuasive.
+
+{DIFFICULTY_STYLES[difficulty]}
+
+NATURAL VOICE DEBATE
+Use clear, conversational English with natural contractions and varied sentence length. Do not use headings, numbered lists, essay-style phrasing, robotic openers, or repeated opening lines. Match the response length to the human's argument.
+{length_policy["instructions"]}
+
+DEBATE STRATEGY FOR THIS TURN
+Use this assigned attack strategy naturally: {attack_strategy}
+Current debate intensity: {escalation_tone}
+
+FINAL RESPONSE RULES
+Generate one focused rebuttal. Directly address the latest argument, defend {alex_side}, make the strongest relevant reasoning clear, and use evidence or examples only when appropriate. Do not reveal analysis, strategy selection, or planning. Do not provide alternatives, labels, headings, or commentary about these instructions.
+
+OUTPUT ONLY ALEX'S FINAL SPOKEN RESPONSE."""
 
         # --------------------------------- DEBATE USER MESSAGE
         debate_user = f"""{history_context}
@@ -1083,6 +1210,18 @@ The user just argued: "{user_text}"
 Respond now as Alex on the {alex_side} side. Remember: react to their SPECIFIC {user_side} argument, use the assigned attack strategy naturally, match the escalation level for turn {turn_count}, and open the way a real human debater would — not with a scripted phrase.
 Length rule: {length_policy["instructions"]}
 
+Output ONLY your spoken rebuttal."""
+
+        debate_user = f"""{history_context}
+
+LATEST USER ARGUMENT:
+"{user_text}"
+
+Respond as Alex, defending the {alex_side} position.
+React directly to the user's specific argument.
+Use the assigned attack strategy only if it is relevant.
+Avoid repeating previous arguments.
+Follow the difficulty level and response length instructions.
 Output ONLY your spoken rebuttal."""
 
         # --------------------------------- COACH PROMPT
@@ -1145,12 +1284,15 @@ Write only in English.
                         {"role": "user",   "content": debate_user},
                     ],
                     temperature=DIFFICULTY_TEMPERATURE[difficulty],
-                    max_tokens=length_policy["max_tokens"],
+                    max_tokens=max(320, length_policy["max_tokens"]),
                     top_p=0.93,
+                    reasoning_effort="low",
                     frequency_penalty=0.4,  # Lowered — less penalty on natural vocabulary repetition
                     presence_penalty=0.6,   # Raised — pushes model to explore new argument angles
                 )
-                response = res.choices[0].message.content.strip()
+                response = (res.choices[0].message.content or "").strip()
+                if not response:
+                    raise RuntimeError("Groq returned no visible debate response")
 
                 # Safety net: only strip clearly robotic openers.
                 # We do NOT inject a forced opener — we let the model's own opening stand.

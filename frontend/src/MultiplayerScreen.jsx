@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-const API = "";
+const API = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
 
 export default function MultiplayerScreen({
   selectedTopic,
